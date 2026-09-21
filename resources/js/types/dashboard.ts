@@ -13,10 +13,101 @@ export type PropertyStats = {
 };
 
 export type Finance = {
-    revenue_this_month: number;
-    monthly_potential: number;
-    outstanding: number;
-    collection_rate: number;
+    revenue_this_month: MoneyAggregate[];
+    monthly_potential: MoneyAggregate[];
+    outstanding: MoneyAggregate[];
+    collection_rate: Array<{ currency: string; rate: number }>;
+    expenses: {
+        this_month: MoneyAggregate[];
+        last_month: MoneyAggregate[];
+        change_vs_last_month: MoneyAggregate[];
+    };
+};
+
+export type MoneyAggregate = {
+    currency: string;
+    amount: string;
+};
+
+export type RateAggregate = {
+    currency: string;
+    rate: string;
+};
+
+export type FinancialTrendPoint = {
+    month: string;
+    label: string;
+    revenue: MoneyAggregate[];
+    expenses: MoneyAggregate[];
+    noi: MoneyAggregate[];
+};
+
+export type FinancialCashFlowPoint = {
+    month: string;
+    label: string;
+    collected: MoneyAggregate[];
+    expenses: MoneyAggregate[];
+};
+
+export type FinancialPropertyPerformance = {
+    id: number;
+    name: string;
+    revenue: MoneyAggregate[];
+    expenses: MoneyAggregate[];
+    noi: MoneyAggregate[];
+    operating_margin: RateAggregate[];
+    billed: MoneyAggregate[];
+    collected: MoneyAggregate[];
+    outstanding: MoneyAggregate[];
+    collection_rate: RateAggregate[];
+    occupancy: {
+        total_units: number;
+        occupied_units: number;
+        occupancy_percentage: number;
+    };
+};
+
+export type FinancialDashboardData = {
+    period: 'current_month' | 'ytd';
+    period_start: string;
+    period_end: string;
+    overview: {
+        revenue: MoneyAggregate[];
+        expenses: MoneyAggregate[];
+        noi: MoneyAggregate[];
+        operating_margin: RateAggregate[];
+    };
+    collections: {
+        billed: MoneyAggregate[];
+        collected: MoneyAggregate[];
+        outstanding: MoneyAggregate[];
+        collection_rate: RateAggregate[];
+    };
+    cash_flow: FinancialCashFlowPoint[];
+    trends: FinancialTrendPoint[];
+    property_performance: FinancialPropertyPerformance[];
+    occupancy: {
+        total_units: number;
+        occupied_units: number;
+        occupancy_percentage: number;
+        properties: Array<{
+            id: number;
+            name: string;
+            total_units: number;
+            occupied_units: number;
+            occupancy_percentage: number;
+        }>;
+    };
+    expense_breakdown: Array<{
+        category_id: number;
+        category_label: string;
+        amounts: MoneyAggregate[];
+    }>;
+    upcoming_receivables: Array<{
+        month: string;
+        label: string;
+        receivable: MoneyAggregate[];
+    }>;
 };
 
 export type Stats = {
@@ -32,11 +123,13 @@ export type Stats = {
 export type RentDashboardEntry = {
     id: number;
     tenant_name: string;
+    target_type: 'unit' | 'whole_property';
     unit_name: string;
     property_name: string;
     rent_due_day: number;
     days_overdue: number | null;
     rent_amount: string;
+    currency: string;
     rent_status: 'paid' | 'overdue' | 'due_today' | 'due_soon';
 };
 
@@ -54,6 +147,7 @@ export type NeedsAttentionInvoice = {
     lease_reference: string | null;
     primary_tenant_id: number | null;
     tenant_name: string;
+    target_type: 'unit' | 'whole_property';
     unit_name: string;
     property_name: string;
     reference: string;
@@ -63,6 +157,7 @@ export type NeedsAttentionInvoice = {
     total: string;
     amount_paid: string;
     outstanding: string;
+    currency: string;
     days_overdue: number | null;
     urgency: 'overdue' | 'due_today' | 'due_tomorrow' | 'due_soon' | 'upcoming';
     status: string;
@@ -74,6 +169,7 @@ export type NeedsAttentionInvoice = {
 export type RecentPaymentEntry = {
     id: number;
     amount: string;
+    currency: string;
     payment_date: string;
     payment_method: string;
     status: string;
@@ -119,7 +215,7 @@ export type RecentActivityEntry = {
 };
 
 export type AttentionData = {
-    overdue_invoices: { count: number; amount: number };
+    overdue_invoices: { count: number; amounts: MoneyAggregate[] };
     due_today: number;
     open_maintenance: number;
     leases_ending_soon: number;

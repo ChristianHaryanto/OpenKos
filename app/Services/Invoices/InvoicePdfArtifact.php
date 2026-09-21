@@ -5,11 +5,14 @@ namespace App\Services\Invoices;
 use App\Jobs\GenerateInvoicePdfArtifact;
 use App\Models\Invoice;
 use App\Models\Setting;
+use App\Services\Localization\ApplicationLocale;
 use Illuminate\Support\Facades\Storage;
 
 final class InvoicePdfArtifact
 {
     private const DISK = 'local';
+
+    public function __construct(private ApplicationLocale $locale) {}
 
     public function status(Invoice $invoice): string
     {
@@ -87,8 +90,9 @@ final class InvoicePdfArtifact
         $invoice = Invoice::query()->findOrFail($invoice->getKey());
         $invoice->load([
             'lease.primaryTenant.user',
-            'lease.unit.property.city',
-            'lease.unit.property.region',
+            'lease.property.city',
+            'lease.property.region',
+            'lease.unit',
             'lineItems',
             'payments' => fn ($query) => $query
                 ->where('status', 'confirmed')
@@ -96,19 +100,26 @@ final class InvoicePdfArtifact
                 ->orderBy('id'),
         ]);
 
+        $settings = Setting::some(['site_name', 'locale', 'currency']);
+        $settings['locale'] = $this->locale->resolve($settings['locale'] ?? null);
+        $settings['display_timezone'] = config('app.display_timezone', 'UTC');
+
         $payload = [
-            'settings' => Setting::some(['site_name', 'locale', 'currency']),
+            'settings' => $settings,
+            'translation_catalogs' => $this->translationCatalogs($settings['locale']),
             'invoice' => $this->attributes($invoice, [
                 'id', 'reference', 'created_at', 'period_start', 'period_end',
                 'due_date', 'status', 'total', 'amount_paid',
+                'currency',
             ]),
             'lease' => $this->attributes($invoice->lease, ['id', 'reference']),
+            'target_type' => $invoice->lease?->target_type,
             'unit' => $this->attributes($invoice->lease?->unit, ['id', 'name']),
-            'property' => $this->attributes($invoice->lease?->unit?->property, [
+            'property' => $this->attributes($invoice->lease?->property, [
                 'id', 'name', 'address', 'postal_code',
             ]),
-            'city' => $this->attributes($invoice->lease?->unit?->property?->city, ['id', 'name']),
-            'region' => $this->attributes($invoice->lease?->unit?->property?->region, ['id', 'name']),
+            'city' => $this->attributes($invoice->lease?->property?->city, ['id', 'name']),
+            'region' => $this->attributes($invoice->lease?->property?->region, ['id', 'name']),
             'tenant' => $this->attributes($invoice->lease?->primaryTenant, ['id', 'name', 'phone']),
             'user' => $this->attributes($invoice->lease?->primaryTenant?->user, ['id', 'email']),
             'line_items' => $invoice->lineItems->map(fn ($item) => $this->attributes($item, [
@@ -120,6 +131,19 @@ final class InvoicePdfArtifact
         ];
 
         return hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR));
+    }
+
+    /** @return array<string, string|null> */
+    private function translationCatalogs(string $locale): array
+    {
+        $locales = array_values(array_unique([$locale, $this->locale->fallback()]));
+
+        return collect($locales)->mapWithKeys(function (string $catalogLocale): array {
+            $path = lang_path("{$catalogLocale}.json");
+            $hash = is_file($path) ? hash_file('sha256', $path) : false;
+
+            return [$catalogLocale => is_string($hash) ? $hash : null];
+        })->all();
     }
 
     /** @return array<string, mixed>|null */

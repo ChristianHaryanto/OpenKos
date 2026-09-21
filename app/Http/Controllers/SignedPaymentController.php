@@ -6,11 +6,13 @@ use App\Actions\Payments\StartGatewayPayment;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\InvoiceNotPayableException;
 use App\Exceptions\PaymentGatewayCreationException;
+use App\Exceptions\PaymentGatewayCurrencyUnsupportedException;
 use App\Exceptions\PaymentGatewayUnavailableException;
 use App\Models\Invoice;
 use App\Models\PaymentAttempt;
 use App\Services\Payments\PaymentGatewayManager;
 use App\Services\Payments\SignedInvoicePaymentLink;
+use App\Support\DateTimeFormatter;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -28,13 +30,17 @@ class SignedPaymentController extends Controller
         PaymentGatewayManager $gateways,
     ): Response {
         $invoice = $this->invoice($request, $token, $paymentLinks);
-        $invoice->load(['lineItems', 'lease.unit.property', 'lease.primaryTenant']);
+        $invoice->load(['lineItems', 'lease.property', 'lease.unit', 'lease.primaryTenant']);
         $invoice->append(['outstanding', 'display_status']);
 
         $gatewayAttempts = $this->gatewayAttempts($invoice);
         $hasResumableAttempt = $gatewayAttempts->contains(
             fn (PaymentAttempt $attempt): bool => $attempt->resumable,
         );
+        $activeGateway = $hasResumableAttempt ? null : $gateways->active();
+        $currencySupported = $activeGateway === null
+            ? false
+            : $gateways->supportsCurrency($activeGateway, $invoice->currency) !== false;
 
         return Inertia::render('payments/signed-invoice', [
             'invoice' => [
@@ -47,8 +53,10 @@ class SignedPaymentController extends Controller
                 'total' => (string) $invoice->total,
                 'amount_paid' => (string) $invoice->amount_paid,
                 'outstanding' => $invoice->outstanding,
+                'currency' => $invoice->currency,
                 'context' => [
-                    'property_name' => $invoice->lease?->unit?->property?->name,
+                    'target_type' => $invoice->lease?->target_type,
+                    'property_name' => $invoice->lease?->property?->name,
                     'unit_name' => $invoice->lease?->unit?->name,
                     'tenant_name' => $this->maskedTenantName($invoice->lease?->primaryTenant?->name),
                 ],
@@ -65,13 +73,13 @@ class SignedPaymentController extends Controller
                 'amount' => (string) $attempt->amount,
                 'currency' => $attempt->currency,
                 'status' => $attempt->status->value,
-                'expires_at' => $attempt->expires_at?->toISOString(),
+                'expires_at' => DateTimeFormatter::nullableIso($attempt->expires_at),
                 'resumable' => $attempt->resumable,
                 'checkout_instructions' => $attempt->checkout_instructions,
-                'initiated_at' => $attempt->initiated_at->toISOString(),
+                'initiated_at' => DateTimeFormatter::iso($attempt->initiated_at),
             ])->values()->all(),
             'onlinePaymentAvailable' => $this->isPayable($invoice)
-                && ($hasResumableAttempt || $gateways->active() !== null),
+                && ($hasResumableAttempt || $currencySupported),
             'paymentUrl' => $request->fullUrl(),
             'csrfToken' => csrf_token(),
         ]);
@@ -87,6 +95,8 @@ class SignedPaymentController extends Controller
 
         try {
             $result = $action->executeViaSignedLink($invoice);
+        } catch (PaymentGatewayCurrencyUnsupportedException) {
+            return $this->gatewayPaymentError($request, __('Online payment is not available for this invoice.'));
         } catch (InvoiceNotPayableException|PaymentGatewayUnavailableException) {
             return $this->gatewayPaymentError($request, __('Online payment is not available for this invoice.'));
         } catch (PaymentGatewayCreationException $exception) {

@@ -9,10 +9,54 @@ use OpenKOS\Platform\Plugin\Plugin;
 
 final class ComposerPluginDiscovery implements PluginDiscovery
 {
+    public function __construct(private RuntimePluginDiscovery $runtime) {}
+
     /**
      * @return array<int, class-string<Plugin>>
      */
     public function discover(): array
+    {
+        $composerPlugins = $this->discoverComposerOnly();
+        $runtimePlugins = $this->runtime->discover([
+            ...config('platform.plugins', []),
+            ...$composerPlugins,
+        ]);
+
+        $composerClassNames = array_fill_keys(array_map(
+            fn (string $class): string => $this->canonicalClassName($class),
+            $composerPlugins,
+        ), true);
+        $duplicateClasses = array_values(array_filter(
+            $runtimePlugins,
+            fn (string $class): bool => isset($composerClassNames[$this->canonicalClassName($class)]),
+        ));
+        if ($duplicateClasses !== []) {
+            throw new InvalidArgumentException(
+                'Runtime plugin entry class conflicts with an existing plugin: '.implode(', ', $duplicateClasses),
+            );
+        }
+
+        return array_values(array_unique([...$composerPlugins, ...$runtimePlugins]));
+    }
+
+    /**
+     * @return array<int, class-string<Plugin>>
+     */
+    public function discoverComposerOnly(): array
+    {
+        return $this->discoverComposerPlugins();
+    }
+
+    /** @return array{status: string, error: string}|null */
+    public function runtimeFailureFor(string $id): ?array
+    {
+        return $this->runtime->failureFor($id);
+    }
+
+    /**
+     * @return array<int, class-string<Plugin>>
+     */
+    private function discoverComposerPlugins(): array
     {
         $disabledPackages = config('platform.discovery.disabled_packages', []);
         $packages = InstalledVersions::getInstalledPackages();
@@ -29,6 +73,10 @@ final class ComposerPluginDiscovery implements PluginDiscovery
             $installPath = InstalledVersions::getInstallPath($package);
 
             if (! is_string($installPath)) {
+                continue;
+            }
+
+            if ($this->isRuntimePackagePath($installPath)) {
                 continue;
             }
 
@@ -85,5 +133,26 @@ final class ComposerPluginDiscovery implements PluginDiscovery
         }
 
         return $metadata;
+    }
+
+    private function canonicalClassName(string $class): string
+    {
+        return strtolower(ltrim(trim($class), '\\'));
+    }
+
+    private function isRuntimePackagePath(string $installPath): bool
+    {
+        $runtimePath = config('platform.runtime.path');
+
+        if (! is_string($runtimePath)) {
+            return false;
+        }
+
+        $runtimeRoot = realpath($runtimePath);
+        $packagePath = realpath($installPath);
+
+        return is_string($runtimeRoot)
+            && is_string($packagePath)
+            && ($packagePath === $runtimeRoot || str_starts_with($packagePath, $runtimeRoot.DIRECTORY_SEPARATOR));
     }
 }

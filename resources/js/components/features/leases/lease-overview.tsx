@@ -1,5 +1,7 @@
 import { ChevronDown } from 'lucide-react';
+import { useState } from 'react';
 import { StatusBadge } from '@/components/shared/status-badge';
+import { Button } from '@/components/ui/button';
 import {
     Collapsible,
     CollapsibleContent,
@@ -8,14 +10,21 @@ import {
 import { DUE_DAY_LABELS } from '@/lib/constants';
 import { BILLING_STRATEGIES } from '@/lib/constants/billing';
 import { formatDate, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import type { Lease } from '@/types';
+import DepositSettlementSheet from './deposit-settlement-sheet';
 
 export default function LeaseOverview({ lease }: { lease: Lease }) {
-    const unitLabel = lease.unit?.name ?? '—';
-    const propertyName = lease.unit?.property?.name ?? '—';
-    const city = lease.unit?.property?.city;
+    const [settlementOpen, setSettlementOpen] = useState(false);
+    const unitLabel = lease.unit?.name ?? t('Entire property');
+    const propertyName = lease.property?.name ?? '—';
+    const city = lease.property?.city;
     const propertyCity =
         city && typeof city === 'object' ? city.name : (city ?? '');
+    const depositSettlement = lease.deposit_settlement;
+    const billingStrategy =
+        BILLING_STRATEGIES.find((s) => s.value === lease.billing_strategy)
+            ?.label ?? 'Advance (due within period)';
 
     return (
         <div className="space-y-6">
@@ -27,7 +36,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                 <div>
                     <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2">
                         <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                            Occupancy
+                            {t('Occupancy')}
                         </h3>
                         <ChevronDown className="ui-open:rotate-180 size-3 text-muted-foreground transition-transform" />
                     </CollapsibleTrigger>
@@ -35,26 +44,27 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                         <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
                             <div>
                                 <p className="mb-2 text-xs text-muted-foreground">
-                                    Tenants
+                                    {t('Tenants')}
                                 </p>
                                 <div className="space-y-2">
                                     {(lease.tenants ?? []).length > 0
-                                        ? lease.tenants.map((t) => (
+                                        ? lease.tenants.map((tenant) => (
                                               <div
-                                                  key={t.id}
+                                                  key={tenant.id}
                                                   className="flex items-center justify-between"
                                               >
                                                   <span className="text-sm font-medium">
-                                                      {t.name}
-                                                      {t.pivot?.is_primary && (
-                                                          <span className="ml-2 text-[10px] font-medium text-primary uppercase">
-                                                              Primary
+                                                      {tenant.name}
+                                                      {tenant.pivot
+                                                          ?.is_primary && (
+                                                          <span className="ml-2 text-xs font-medium text-primary uppercase">
+                                                              {t('Primary')}
                                                           </span>
                                                       )}
                                                   </span>
-                                                  {t.phone && (
+                                                  {tenant.phone && (
                                                       <span className="text-xs text-muted-foreground">
-                                                          {t.phone}
+                                                          {tenant.phone}
                                                       </span>
                                                   )}
                                               </div>
@@ -83,13 +93,13 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                             </div>
                             <div className="flex items-center justify-between">
                                 <span className="text-sm text-muted-foreground">
-                                    Unit
+                                    {t('Unit')}
                                 </span>
                                 <span className="text-sm">{unitLabel}</span>
                             </div>
                             <div className="flex items-center justify-between">
                                 <span className="text-sm text-muted-foreground">
-                                    Property
+                                    {t('Property')}
                                 </span>
                                 <span className="text-sm">
                                     {propertyName}
@@ -105,7 +115,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                 <div>
                     <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2">
                         <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                            Agreement
+                            {t('Agreement')}
                         </h3>
                         <ChevronDown className="ui-open:rotate-180 size-3 text-muted-foreground transition-transform" />
                     </CollapsibleTrigger>
@@ -114,7 +124,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                             {lease.reference && (
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="text-muted-foreground">
-                                        Reference
+                                        {t('Reference')}
                                     </span>
                                     <span className="font-mono text-xs">
                                         {lease.reference}
@@ -123,7 +133,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                             )}
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Start date
+                                    {t('Start date')}
                                 </span>
                                 <span className="tabular-nums">
                                     {formatDate(lease.start_date)}
@@ -131,7 +141,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                             </div>
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    End date
+                                    {t('End date')}
                                 </span>
                                 <span className="tabular-nums">
                                     {lease.termination_date
@@ -142,7 +152,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                             {lease.termination_reason && (
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="text-muted-foreground">
-                                        Reason
+                                        {t('Reason')}
                                     </span>
                                     <span className="text-right text-sm capitalize">
                                         {lease.termination_reason.replace(
@@ -161,7 +171,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                 <div>
                     <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2">
                         <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                            Rent
+                            {t('Rent')}
                         </h3>
                         <ChevronDown className="ui-open:rotate-180 size-3 text-muted-foreground transition-transform" />
                     </CollapsibleTrigger>
@@ -169,35 +179,39 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                         <div className="space-y-2 rounded-lg border bg-muted/30 p-4">
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Billing rate
+                                    {t('Billing rate')}
                                 </span>
                                 <span className="tabular-nums">
-                                    {formatPrice(lease.rent_amount)}
+                                    {formatPrice(
+                                        lease.rent_amount,
+                                        lease.currency,
+                                    )}
                                     {lease.billing_label}
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Billing strategy
+                                    {t('Billing strategy')}
                                 </span>
                                 <span className="text-xs font-medium">
-                                    {BILLING_STRATEGIES.find(
-                                        (s) =>
-                                            s.value === lease.billing_strategy,
-                                    )?.label ?? 'Advance (due within period)'}
+                                    {t(billingStrategy)}
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Monthly equivalent
+                                    {t('Monthly equivalent')}
                                 </span>
                                 <span className="tabular-nums">
-                                    {formatPrice(lease.monthly_equivalent)}/mo
+                                    {formatPrice(
+                                        lease.monthly_equivalent,
+                                        lease.currency,
+                                    )}
+                                    /mo
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Due every month
+                                    {t('Due every month')}
                                 </span>
                                 <span className="tabular-nums">
                                     {DUE_DAY_LABELS[lease.rent_due_day] ??
@@ -213,7 +227,7 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                 <div>
                     <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2">
                         <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                            Deposit
+                            {t('Deposit')}
                         </h3>
                         <ChevronDown className="ui-open:rotate-180 size-3 text-muted-foreground transition-transform" />
                     </CollapsibleTrigger>
@@ -221,43 +235,147 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
                         <div className="space-y-2 rounded-lg border bg-muted/30 p-4">
                             <div className="flex items-center justify-between text-sm">
                                 <span className="text-muted-foreground">
-                                    Amount
+                                    {t('Amount')}
                                 </span>
                                 <span className="tabular-nums">
-                                    {formatPrice(lease.deposit_amount)}
+                                    {formatPrice(
+                                        depositSettlement?.original_amount ??
+                                            lease.deposit_amount,
+                                        depositSettlement?.currency ??
+                                            lease.currency,
+                                    )}
                                 </span>
                             </div>
                             {lease.deposit_paid_at && (
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="text-muted-foreground">
-                                        Paid at
+                                        {t('Paid at')}
                                     </span>
                                     <span className="tabular-nums">
                                         {formatDate(lease.deposit_paid_at)}
                                     </span>
                                 </div>
                             )}
-                            {lease.deposit_refund_amount && (
-                                <div className="flex items-center justify-between text-sm">
-                                    <span className="text-muted-foreground">
-                                        Refund
-                                    </span>
-                                    <span className="tabular-nums">
-                                        {formatPrice(
-                                            lease.deposit_refund_amount,
-                                        )}
-                                    </span>
-                                </div>
+                            {depositSettlement ? (
+                                <>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-muted-foreground">
+                                            {t('Settlement')}
+                                        </span>
+                                        <span className="font-medium capitalize">
+                                            {depositSettlement.status}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-muted-foreground">
+                                            {t('Settlement date')}
+                                        </span>
+                                        <span className="tabular-nums">
+                                            {formatDate(
+                                                depositSettlement.settlement_date,
+                                            )}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-muted-foreground">
+                                            {t('Refund')}
+                                        </span>
+                                        <span className="tabular-nums">
+                                            {formatPrice(
+                                                depositSettlement.refund_amount,
+                                                depositSettlement.currency,
+                                            )}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-muted-foreground">
+                                            {t('Deductions')}
+                                        </span>
+                                        <span className="tabular-nums">
+                                            {formatPrice(
+                                                depositSettlement.deductions_total,
+                                                depositSettlement.currency,
+                                            )}
+                                        </span>
+                                    </div>
+                                    {depositSettlement.deductions.map(
+                                        (deduction) => (
+                                            <div
+                                                key={deduction.id}
+                                                className="rounded-md bg-muted/30 p-2 text-xs"
+                                            >
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <span>
+                                                        {deduction.reason}
+                                                    </span>
+                                                    <span className="tabular-nums">
+                                                        {formatPrice(
+                                                            deduction.amount,
+                                                            depositSettlement.currency,
+                                                        )}
+                                                    </span>
+                                                </div>
+                                                {deduction.description && (
+                                                    <p className="mt-1 text-muted-foreground">
+                                                        {deduction.description}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ),
+                                    )}
+                                    {depositSettlement.refund_reference && (
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-muted-foreground">
+                                                {t('Refund reference')}
+                                            </span>
+                                            <span className="text-right">
+                                                {
+                                                    depositSettlement.refund_reference
+                                                }
+                                            </span>
+                                        </div>
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    {lease.deposit_refund_amount && (
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-muted-foreground">
+                                                {t('Refund')}
+                                            </span>
+                                            <span className="tabular-nums">
+                                                {formatPrice(
+                                                    lease.deposit_refund_amount,
+                                                    lease.currency,
+                                                )}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {lease.deposit_refunded_at && (
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-muted-foreground">
+                                                {t('Refunded at')}
+                                            </span>
+                                            <span className="tabular-nums">
+                                                {formatDate(
+                                                    lease.deposit_refunded_at,
+                                                )}
+                                            </span>
+                                        </div>
+                                    )}
+                                </>
                             )}
-                            {lease.deposit_refunded_at && (
-                                <div className="flex items-center justify-between text-sm">
-                                    <span className="text-muted-foreground">
-                                        Refunded at
-                                    </span>
-                                    <span className="tabular-nums">
-                                        {formatDate(lease.deposit_refunded_at)}
-                                    </span>
-                                </div>
+                            {lease.status === 'terminated' && (
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    className="mt-2 w-full"
+                                    onClick={() => setSettlementOpen(true)}
+                                >
+                                    {depositSettlement
+                                        ? t('View Deposit Settlement')
+                                        : t('Settle Deposit')}
+                                </Button>
                             )}
                         </div>
                     </CollapsibleContent>
@@ -267,13 +385,19 @@ export default function LeaseOverview({ lease }: { lease: Lease }) {
             {lease.notes && (
                 <div>
                     <p className="mb-2 text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        Notes
+                        {t('Notes')}
                     </p>
                     <p className="rounded-lg border bg-muted/30 p-4 text-sm whitespace-pre-wrap">
                         {lease.notes}
                     </p>
                 </div>
             )}
+
+            <DepositSettlementSheet
+                lease={lease}
+                open={settlementOpen}
+                onOpenChange={setSettlementOpen}
+            />
         </div>
     );
 }

@@ -22,6 +22,7 @@ Homestead.json
 Homestead.yaml
 npm-debug.log
 yarn-error.log
+test-results/
 /auth.json
 /.fleet
 /.idea
@@ -34,19 +35,20 @@ testing_test_*
 /.ai-work
 
 # Local developer tooling
-/AGENTS.md
+AGENTS.md
 /GEMINI.md
-/.agents/
-/.gemini/
-/.opencode/
-/.codex/
+/.agents
+/.gemini
+/.opencode
+/.codex
 /opencode.json
 /skills-lock.json
 /prompts/create-fonnte-package.md
 /graphify-out
+/resources/js/graphify-out
 /boost.json
-/data/
+/data
 DESIGN.md
 PRODUCT.md
 /FINDINGS.md
-/.impeccable/
+/.impeccable

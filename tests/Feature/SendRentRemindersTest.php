@@ -3,8 +3,11 @@
 use App\Actions\Invoices\GenerateInvoices;
 use App\Actions\Reminders\SendRentReminders;
 use App\Business\Reminders\PaymentReminderScheduler;
+use App\Data\Reminder\ReminderEvent;
+use App\Data\Reminder\ReminderInvoiceData;
 use App\Data\Reminder\ReminderSettings;
 use App\Enums\InvoiceStatus;
+use App\Enums\ReminderType;
 use App\Jobs\GenerateInvoicePdfArtifact;
 use App\Models\Invoice;
 use App\Models\Lease;
@@ -15,9 +18,16 @@ use App\Models\Tenant;
 use App\Models\Unit;
 use App\Models\User;
 use App\Notifications\RentReminder;
+use App\Repositories\ReminderRepository;
 use App\Services\Invoices\InvoicePdfArtifact;
 use Carbon\Carbon;
+use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 
 uses()->beforeEach(function () {
@@ -58,13 +68,36 @@ function createLeaseWithTenant(array $overrides = []): Lease
     return $lease;
 }
 
+function reminderEventFor(Lease $lease, ReminderType $type, ?int $overdueDays = null): ReminderEvent
+{
+    return new ReminderEvent(
+        lease: $lease,
+        type: $type,
+        periodStart: '2026-07-01',
+        periodEnd: '2026-07-31',
+        dueDate: '2026-07-01',
+        amount: 1_500_000,
+        currency: 'IDR',
+        overdueDays: $overdueDays,
+    );
+}
+
+function scheduledReminderEvents(Lease $lease, ReminderSettings $settings): array
+{
+    $invoices = app(ReminderRepository::class)
+        ->payableInvoicesFor($lease)
+        ->map(fn (Invoice $invoice): ReminderInvoiceData => ReminderInvoiceData::fromInvoice($invoice));
+
+    return (new PaymentReminderScheduler)->pendingFor($lease, $invoices->all(), $settings, today());
+}
+
 describe('PaymentReminderScheduler', function () {
     it('returns upcoming event when days match', function () {
         Carbon::setTestNow(Carbon::parse('2026-06-28'));
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2026-06-01']);
         $settings = new ReminderSettings(true, 3, []);
 
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         expect($events)->toHaveCount(1);
         expect($events[0]->type->value)->toBe('upcoming');
@@ -80,7 +113,7 @@ describe('PaymentReminderScheduler', function () {
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2026-06-01']);
         $settings = new ReminderSettings(true, 3, []);
 
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         expect($events)->toHaveCount(1);
         expect($events[0]->type->value)->toBe('due_today');
@@ -88,7 +121,7 @@ describe('PaymentReminderScheduler', function () {
         Carbon::setTestNow();
     });
 
-    it('converts fractional outstanding amounts to cents without truncation', function () {
+    it('preserves fractional outstanding amounts', function () {
         Carbon::setTestNow(Carbon::parse('2026-07-01'));
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2026-06-01']);
         $lease->invoices()->whereDate('due_date', '2026-07-01')->firstOrFail()->update([
@@ -97,10 +130,10 @@ describe('PaymentReminderScheduler', function () {
         ]);
         $settings = new ReminderSettings(true, 3, []);
 
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         expect($events)->toHaveCount(1);
-        expect($events[0]->amount)->toBe(29);
+        expect($events[0]->amount)->toBe('0.290');
 
         Carbon::setTestNow();
     });
@@ -110,7 +143,7 @@ describe('PaymentReminderScheduler', function () {
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2026-07-01']);
         $settings = new ReminderSettings(true, 3, [1, 3, 7]);
 
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         expect($events)->toHaveCount(1);
         expect($events[0]->type->value)->toBe('overdue');
@@ -124,7 +157,7 @@ describe('PaymentReminderScheduler', function () {
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2024-01-01']);
         $settings = new ReminderSettings(true, 3, [7]);
 
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         $overdueEvents = array_filter($events, fn ($e) => $e->type->value === 'overdue');
         expect($overdueEvents)->not->toBeEmpty();
@@ -144,7 +177,7 @@ describe('PaymentReminderScheduler', function () {
         ]);
 
         $settings = new ReminderSettings(true, 3, []);
-        $events = (new PaymentReminderScheduler)->pendingFor($lease, $settings);
+        $events = scheduledReminderEvents($lease, $settings);
 
         expect($events)->toBeEmpty();
 
@@ -155,7 +188,7 @@ describe('PaymentReminderScheduler', function () {
         Carbon::setTestNow(Carbon::parse('2026-07-01'));
         $lease = createLeaseWithTenant(['rent_due_day' => 1, 'start_date' => '2026-06-01']);
         $settings = new ReminderSettings(true, 3, []);
-        $event = (new PaymentReminderScheduler)->pendingFor($lease, $settings)[0];
+        $event = scheduledReminderEvents($lease, $settings)[0];
         $queuedReminder = unserialize(serialize(new RentReminder($event)));
 
         expect($queuedReminder->shouldSend($lease->primaryTenant, 'mail'))->toBeTrue();
@@ -165,6 +198,96 @@ describe('PaymentReminderScheduler', function () {
         expect($queuedReminder->shouldSend($lease->primaryTenant, 'mail'))->toBeFalse();
 
         Carbon::setTestNow();
+    });
+});
+
+describe('ReminderRepository', function () {
+    it('records a new reminder with one insert attempt', function () {
+        $lease = createLeaseWithTenant();
+        $queries = [];
+
+        DB::listen(function (QueryExecuted $query) use (&$queries): void {
+            if (str_contains(strtolower($query->sql), 'reminder_logs')) {
+                $queries[] = $query->sql;
+            }
+        });
+
+        $log = app(ReminderRepository::class)->recordIfAbsent(
+            reminderEventFor($lease, ReminderType::Upcoming),
+        );
+
+        expect($log)->toBeInstanceOf(ReminderLog::class)
+            ->and($log?->overdue_days)->toBe(ReminderLog::NON_OVERDUE_DAYS)
+            ->and($queries)->toHaveCount(1)
+            ->and(strtolower($queries[0]))->toContain('insert');
+    });
+
+    it('ignores duplicate reminder keys', function (ReminderType $type, ?int $overdueDays) {
+        $lease = createLeaseWithTenant();
+        $repository = app(ReminderRepository::class);
+        $event = reminderEventFor($lease, $type, $overdueDays);
+
+        expect($repository->recordIfAbsent($event))->toBeInstanceOf(ReminderLog::class)
+            ->and($repository->recordIfAbsent($event))->toBeNull()
+            ->and(ReminderLog::count())->toBe(1);
+    })->with([
+        'upcoming' => [ReminderType::Upcoming, null],
+        'due today' => [ReminderType::DueToday, null],
+        'overdue' => [ReminderType::Overdue, 1],
+    ]);
+
+    it('keeps upcoming and due-today reminder keys distinct', function () {
+        $lease = createLeaseWithTenant();
+        $repository = app(ReminderRepository::class);
+
+        $upcoming = $repository->recordIfAbsent(
+            reminderEventFor($lease, ReminderType::Upcoming),
+        );
+        $dueToday = $repository->recordIfAbsent(
+            reminderEventFor($lease, ReminderType::DueToday),
+        );
+
+        expect($upcoming)->toBeInstanceOf(ReminderLog::class)
+            ->and($dueToday)->toBeInstanceOf(ReminderLog::class)
+            ->and(ReminderLog::count())->toBe(2);
+    });
+
+    it('preserves zero overdue days', function () {
+        $lease = createLeaseWithTenant();
+
+        $log = app(ReminderRepository::class)->recordIfAbsent(
+            reminderEventFor($lease, ReminderType::Overdue, 0),
+        );
+
+        expect($log?->overdue_days)->toBe(0);
+    });
+
+    it('rethrows foreign-key violations', function () {
+        $lease = createLeaseWithTenant();
+        $lease->id = PHP_INT_MAX;
+
+        expect(fn () => app(ReminderRepository::class)->recordIfAbsent(
+            reminderEventFor($lease, ReminderType::Upcoming),
+        ))->toThrow(QueryException::class);
+    });
+
+    it('rethrows unrelated unique constraint violations', function () {
+        Schema::table('reminder_logs', function (Blueprint $table): void {
+            $table->unique('channel', 'reminder_logs_channel_unique');
+        });
+
+        try {
+            ReminderLog::factory()->create(['channel' => 'whatsapp']);
+            $lease = createLeaseWithTenant();
+
+            expect(fn () => app(ReminderRepository::class)->recordIfAbsent(
+                reminderEventFor($lease, ReminderType::Upcoming),
+            ))->toThrow(UniqueConstraintViolationException::class);
+        } finally {
+            Schema::table('reminder_logs', function (Blueprint $table): void {
+                $table->dropUnique('reminder_logs_channel_unique');
+            });
+        }
     });
 });
 
@@ -200,8 +323,8 @@ describe('SendRentRemindersAction', function () {
         $first = $action->execute($lease);
         $second = $action->execute($lease);
 
-        expect($first)->toHaveCount(1);
-        expect($second)->toBeEmpty();
+        expect($first)->toBe(1);
+        expect($second)->toBe(0);
         expect(ReminderLog::count())->toBe(1);
 
         Notification::assertSentToTimes($lease->primaryTenant, RentReminder::class, 1);
@@ -221,7 +344,7 @@ describe('SendRentRemindersAction', function () {
         $action = app(SendRentReminders::class);
         $sent = $action->execute($lease);
 
-        expect($sent)->toBeEmpty();
+        expect($sent)->toBe(0);
         Notification::assertNothingSent();
 
         Carbon::setTestNow();
@@ -250,7 +373,7 @@ describe('SendRentRemindersAction', function () {
         $action = app(SendRentReminders::class);
         $sent = $action->execute($lease);
 
-        expect($sent)->toBeEmpty();
+        expect($sent)->toBe(0);
         Notification::assertNothingSent();
 
         Carbon::setTestNow();
@@ -266,9 +389,54 @@ describe('SendRentRemindersAction', function () {
 
         $sent = app(SendRentReminders::class)->execute($lease);
 
-        expect($sent)->toBeEmpty();
+        expect($sent)->toBe(0);
         expect(ReminderLog::count())->toBe(0);
         Notification::assertNothingSent();
+
+        Carbon::setTestNow();
+    });
+
+    it('processes large batches in chunks and batches invoice queries', function () {
+        Carbon::setTestNow(Carbon::parse('2026-07-01'));
+        Notification::fake();
+
+        $leases = Lease::factory()->count(101)->create([
+            'start_date' => '2026-06-01',
+            'rent_amount' => 1500000.00,
+            'rent_due_day' => 1,
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'status' => 'active',
+        ]);
+
+        foreach ($leases as $lease) {
+            Invoice::factory()->for($lease)->create([
+                'period_start' => '2026-06-01',
+                'period_end' => '2026-06-30',
+                'due_date' => '2026-07-01',
+                'total' => 1500000,
+                'amount_paid' => 0,
+            ]);
+        }
+
+        $invoiceQueries = [];
+        DB::listen(function (QueryExecuted $query) use (&$invoiceQueries): void {
+            $sql = strtolower($query->sql);
+
+            if (str_contains($sql, ' from "invoices"')
+                && ! str_contains($sql, 'select exists')) {
+                $invoiceQueries[] = $query->sql;
+            }
+        });
+
+        $sent = app(SendRentReminders::class)->execute();
+
+        expect($sent)->toBe($leases->count())
+            ->and(count($invoiceQueries))->toBeGreaterThan(0)
+            ->and(count($invoiceQueries))->toBeLessThan($leases->count())
+            ->and(ReminderLog::count())->toBe($leases->count());
+
+        expect(app(SendRentReminders::class)->execute())->toBe(0);
 
         Carbon::setTestNow();
     });
@@ -339,7 +507,7 @@ describe('SendRentRemindersAction', function () {
                     ->toContain($invoice->period_start->format('d M Y'))
                     ->toContain($invoice->period_end->format('d M Y'))
                     ->toContain($invoice->due_date->format('d M Y'))
-                    ->toContain(number_format((float) $invoice->outstanding, 0))
+                    ->toContain('1.500.000')
                     ->toContain($invoiceUrl);
                 expect($content->htmlBody)->toContain($invoiceUrl);
                 expect($content->attachments)->toHaveCount(1);
@@ -354,7 +522,7 @@ describe('SendRentRemindersAction', function () {
         Carbon::setTestNow();
     });
 
-    it('includes invoice context without a portal link for whatsapp-only tenants', function () {
+    it('includes a signed invoice link for whatsapp-only tenants', function () {
         Carbon::setTestNow(Carbon::parse('2026-07-01'));
         Notification::fake();
 
@@ -378,7 +546,8 @@ describe('SendRentRemindersAction', function () {
                     ->toContain($invoice->period_start->format('d M Y'))
                     ->toContain($invoice->period_end->format('d M Y'))
                     ->toContain($invoice->due_date->format('d M Y'))
-                    ->toContain(number_format((float) $invoice->outstanding, 0))
+                    ->toContain('1.500.000')
+                    ->toMatch('#/pay/invoices/[A-Za-z0-9_-]+\?signature=[a-f0-9]+#')
                     ->not->toContain(route('portal.billing.invoices.show', $invoice));
 
                 $attachment = $content->attachment;
@@ -481,7 +650,7 @@ describe('SendRentRemindersAction', function () {
         Carbon::setTestNow();
     });
 
-    it('omits portal links for users without portal access', function (array $userAttributes) {
+    it('uses signed links for users without portal access', function (array $userAttributes) {
         Carbon::setTestNow(Carbon::parse('2026-07-01'));
         Notification::fake();
 
@@ -499,6 +668,7 @@ describe('SendRentRemindersAction', function () {
             RentReminder::class,
             function (RentReminder $notification) use ($invoice, $tenant): bool {
                 expect($notification->toWhatsAppChannel($tenant)->message)
+                    ->toMatch('#/pay/invoices/[A-Za-z0-9_-]+\?signature=[a-f0-9]+#')
                     ->not->toContain(route('portal.billing.invoices.show', $invoice));
                 expect($notification->toArray($tenant)['url'])->toBeNull();
 

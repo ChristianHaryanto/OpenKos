@@ -23,6 +23,7 @@ import {
     TenantDocumentsSheet,
     TenantFormSheet,
 } from '@/components/features';
+import { EntityTransferMenu } from '@/components/features/data-transfer/transfer-actions';
 import InviteToAppSheet from '@/components/features/tenants/invite-to-app-sheet';
 import { Heading } from '@/components/shared';
 import { StatusBadge } from '@/components/shared/status-badge';
@@ -45,6 +46,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useTable } from '@/hooks/use-table';
 import { appAccessStatus, inviteActionLabel } from '@/lib/app-access';
+import { t } from '@/lib/i18n';
 import tenants from '@/routes/tenants';
 import type {
     Auth,
@@ -61,6 +63,7 @@ type PageProps = {
     sort?: string;
     search?: string;
     status?: string;
+    app_access?: string;
     per_page?: number;
     table: TableMeta;
 };
@@ -71,6 +74,7 @@ export default function Index({
     sort: currentSort = 'name',
     search: currentSearch = '',
     status: currentStatus = '',
+    app_access: currentAppAccess = '',
     per_page: currentPerPage = 15,
     table: tableMeta,
 }: PageProps) {
@@ -117,6 +121,7 @@ export default function Index({
             search: currentSearch,
             per_page: String(currentPerPage),
             status: currentStatus,
+            app_access: currentAppAccess,
         },
         defaults: {
             sort: 'name',
@@ -212,34 +217,34 @@ export default function Index({
     const columns: TableColumn<WorkspaceTenant>[] = [
         {
             key: 'name',
-            label: 'Name',
+            label: t('Name'),
             sortable: true,
             className: 'font-medium',
         },
         {
             key: 'phone',
-            label: 'Phone',
+            label: t('Phone'),
             sortable: true,
             className: 'text-muted-foreground',
-            render: (t) => t.phone ?? '\u2014',
+            render: (tenantRow) => tenantRow.phone ?? '\u2014',
         },
         {
             key: '_lease',
-            label: 'Lease',
-            render: (t) =>
-                (t.active_leases_count ?? 0) > 0 ? (
+            label: t('Lease'),
+            render: (tenantRow) =>
+                (tenantRow.active_leases_count ?? 0) > 0 ? (
                     <StatusBadge status="active" />
                 ) : (
-                    <Badge variant="outline">None</Badge>
+                    <Badge variant="outline">{t('None')}</Badge>
                 ),
         },
         {
             key: '_status',
-            label: 'Status',
-            render: (t) => {
-                const status = t.deleted_at
+            label: t('Status'),
+            render: (tenantRow) => {
+                const status = tenantRow.deleted_at
                     ? 'archived'
-                    : t.is_active
+                    : tenantRow.is_active
                       ? 'active'
                       : 'inactive';
 
@@ -248,9 +253,9 @@ export default function Index({
         },
         {
             key: '_app_access',
-            label: 'App Access',
-            render: (t) => {
-                const status = appAccessStatus(t.user);
+            label: t('App Access'),
+            render: (tenantRow) => {
+                const status = appAccessStatus(tenantRow.user);
 
                 return status === 'none' ? (
                     <span className="text-muted-foreground">—</span>
@@ -262,7 +267,7 @@ export default function Index({
         {
             key: '_actions',
             label: '',
-            render: (t) => (
+            render: (tenantRow) => (
                 <DropdownMenu>
                     <DropdownMenuTrigger
                         asChild
@@ -277,83 +282,96 @@ export default function Index({
                         onClick={(e: React.MouseEvent) => e.stopPropagation()}
                     >
                         <DropdownMenuItem
-                            onClick={() => router.get(tenants.show.url(t))}
+                            onClick={() =>
+                                router.get(tenants.show.url(tenantRow))
+                            }
                         >
                             <ExternalLink className="size-4" />
-                            Open Workspace
+                            {t('Open Workspace')}
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => openDetail(t)}>
+                        <DropdownMenuItem onClick={() => openDetail(tenantRow)}>
                             <Eye className="size-4" />
-                            View
+                            {t('View')}
                         </DropdownMenuItem>
-                        {!t.deleted_at && t.active_leases_count === 0 && (
+                        {!tenantRow.deleted_at &&
+                            tenantRow.active_leases_count === 0 && (
+                                <DropdownMenuItem
+                                    onClick={() => {
+                                        setAssignTenant(tenantRow);
+                                        setAssignUnitOpen(true);
+                                    }}
+                                >
+                                    <DoorOpen className="size-4" />
+                                    {t('Assign to Unit')}
+                                </DropdownMenuItem>
+                            )}
+                        {!tenantRow.deleted_at && (
                             <DropdownMenuItem
-                                onClick={() => {
-                                    setAssignTenant(t);
-                                    setAssignUnitOpen(true);
-                                }}
+                                onClick={() => openEdit(tenantRow)}
                             >
-                                <DoorOpen className="size-4" />
-                                Assign to Unit
-                            </DropdownMenuItem>
-                        )}
-                        {!t.deleted_at && (
-                            <DropdownMenuItem onClick={() => openEdit(t)}>
                                 <Pencil className="size-4" />
-                                Edit
+                                {t('Edit')}
                             </DropdownMenuItem>
                         )}
 
-                        {!t.deleted_at && <DropdownMenuSeparator />}
+                        {!tenantRow.deleted_at && <DropdownMenuSeparator />}
 
                         {permissions.includes('tenants.invite') &&
-                            !t.deleted_at &&
-                            !t.user_id && (
+                            !tenantRow.deleted_at &&
+                            !tenantRow.user_id && (
                                 <DropdownMenuItem
-                                    onClick={() => setInviteTenant(t)}
+                                    onClick={() => setInviteTenant(tenantRow)}
                                 >
                                     <MailPlus className="size-4" />
-                                    Invite to App
+                                    {t('Invite to App')}
                                 </DropdownMenuItem>
                             )}
                         {permissions.includes('tenants.invite') &&
-                            !t.deleted_at &&
-                            inviteActionLabel(appAccessStatus(t.user)) && (
+                            !tenantRow.deleted_at &&
+                            inviteActionLabel(
+                                appAccessStatus(tenantRow.user),
+                            ) && (
                                 <DropdownMenuItem
-                                    onClick={() => resendInvitation(t)}
+                                    onClick={() => resendInvitation(tenantRow)}
                                 >
                                     <Send className="size-4" />
-                                    {inviteActionLabel(appAccessStatus(t.user))}
+                                    {t(
+                                        inviteActionLabel(
+                                            appAccessStatus(tenantRow.user),
+                                        ) ?? '',
+                                    )}
                                 </DropdownMenuItem>
                             )}
                         {permissions.includes('tenants.invite') &&
-                            !t.deleted_at &&
+                            !tenantRow.deleted_at &&
                             ['invited', 'active'].includes(
-                                appAccessStatus(t.user),
+                                appAccessStatus(tenantRow.user),
                             ) && (
                                 <DropdownMenuItem
                                     variant="destructive"
-                                    onClick={() => setDisableConfirm(t)}
+                                    onClick={() => setDisableConfirm(tenantRow)}
                                 >
                                     <UserX className="size-4" />
-                                    Disable Access
+                                    {t('Disable Access')}
                                 </DropdownMenuItem>
                             )}
 
                         <DropdownMenuSeparator />
 
-                        {t.deleted_at ? (
-                            <DropdownMenuItem onClick={() => restore(t)}>
+                        {tenantRow.deleted_at ? (
+                            <DropdownMenuItem
+                                onClick={() => restore(tenantRow)}
+                            >
                                 <RotateCcw className="size-4" />
-                                Restore
+                                {t('Restore')}
                             </DropdownMenuItem>
                         ) : (
                             <DropdownMenuItem
                                 variant="destructive"
-                                onClick={() => archive(t)}
+                                onClick={() => archive(tenantRow)}
                             >
                                 <Trash2 className="size-4" />
-                                Archive
+                                {t('Archive')}
                             </DropdownMenuItem>
                         )}
                     </DropdownMenuContent>
@@ -362,18 +380,40 @@ export default function Index({
         },
     ];
 
+    const tenantMoveOutLease = moveOutTenant
+        ? (moveOutTenant as WorkspaceTenant & { leases?: Lease[] }).leases?.[0]
+        : null;
+
     return (
         <>
-            <Head title="Tenants" />
+            <Head title={t('Tenants')} />
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <div className="flex items-center justify-between">
                     <Heading
-                        title="Tenants"
-                        description="Manage your tenants"
+                        title={t('Tenants')}
+                        description={t('Manage your tenants')}
                     />
 
-                    <Button onClick={openCreate}>New Tenant</Button>
+                    <div className="flex items-center gap-2">
+                        <Button onClick={openCreate}>{t('New Tenant')}</Button>
+                        <EntityTransferMenu
+                            datasetLabel={t('Tenants')}
+                            canImport={auth.role === 'owner'}
+                            canExport={
+                                auth.role === 'owner' ||
+                                auth.permissions.includes('tenants.export')
+                            }
+                            importHref={tenants.transfer.import.url()}
+                            exportHref={tenants.transfer.export.url({
+                                query: {
+                                    search: currentSearch || undefined,
+                                    status: currentStatus || undefined,
+                                    app_access: currentAppAccess || undefined,
+                                },
+                            })}
+                        />
+                    </div>
                 </div>
 
                 <FilterBar
@@ -387,7 +427,9 @@ export default function Index({
                             value={table.searchValue}
                             onChange={table.onSearchChange}
                             onClear={table.clearSearch}
-                            placeholder="Search by name, phone, or ID card..."
+                            placeholder={t(
+                                'Search by name, phone, or ID card...',
+                            )}
                         />
                     }
                 />
@@ -402,10 +444,10 @@ export default function Index({
                     perPage={currentPerPage}
                     onPageChange={table.goToPage}
                     onPerPageChange={table.setPerPage}
-                    noun="tenants"
+                    noun={t('tenants')}
                     empty={{
-                        message: 'No tenants yet.',
-                        createLabel: 'Create your first tenant',
+                        message: t('No tenants yet.'),
+                        createLabel: t('Create your first tenant'),
                         onCreate: openCreate,
                     }}
                 />
@@ -454,6 +496,7 @@ export default function Index({
 
             {assignTenant && (
                 <AssignUnitSheet
+                    key={assignTenant.id}
                     tenant={assignTenant}
                     availableUnits={_availableUnits}
                     open={assignUnitOpen}
@@ -469,14 +512,18 @@ export default function Index({
 
             <MoveOutSheet
                 lease={
-                    moveOutTenant
+                    moveOutTenant && tenantMoveOutLease
                         ? {
-                              id:
-                                  (
-                                      moveOutTenant as WorkspaceTenant & {
-                                          leases?: Lease[];
-                                      }
-                                  ).leases?.[0]?.id ?? 0,
+                              id: tenantMoveOutLease.id,
+                              currency: tenantMoveOutLease.currency,
+                              target_type: tenantMoveOutLease.target_type,
+                              property: tenantMoveOutLease.property
+                                  ? {
+                                        id: tenantMoveOutLease.property.id,
+                                        name: tenantMoveOutLease.property.name,
+                                    }
+                                  : null,
+                              deposit_amount: tenantMoveOutLease.deposit_amount,
                               tenants: [
                                   {
                                       id: moveOutTenant.id,
@@ -490,12 +537,7 @@ export default function Index({
                                   name: moveOutTenant.name,
                                   phone: moveOutTenant.phone,
                               },
-                              unit:
-                                  (
-                                      moveOutTenant as WorkspaceTenant & {
-                                          leases?: Lease[];
-                                      }
-                                  ).leases?.[0]?.unit ?? null,
+                              unit: tenantMoveOutLease.unit ?? null,
                           }
                         : null
                 }
@@ -516,9 +558,9 @@ export default function Index({
             >
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Archive tenant</DialogTitle>
+                        <DialogTitle>{t('Archive tenant')}</DialogTitle>
                         <DialogDescription>
-                            Are you sure you want to archive{' '}
+                            {t('Are you sure you want to archive')}{' '}
                             <span className="font-medium">
                                 {archiveConfirm?.name}
                             </span>
@@ -530,10 +572,10 @@ export default function Index({
                             variant="outline"
                             onClick={() => setArchiveConfirm(null)}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button variant="destructive" onClick={confirmArchive}>
-                            Archive
+                            {t('Archive')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
@@ -545,15 +587,15 @@ export default function Index({
             >
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Disable app access</DialogTitle>
+                        <DialogTitle>{t('Disable app access')}</DialogTitle>
                         <DialogDescription>
-                            This signs{' '}
+                            {t('This signs')}{' '}
                             <span className="font-medium">
                                 {disableConfirm?.name}
                             </span>{' '}
-                            out and revokes their portal access. They'll still
-                            receive notifications, and you can re-invite them
-                            later.
+                            {t(
+                                "out and revokes their portal access. They'll still receive notifications, and you can re-invite them later.",
+                            )}
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter>
@@ -561,10 +603,10 @@ export default function Index({
                             variant="outline"
                             onClick={() => setDisableConfirm(null)}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button variant="destructive" onClick={confirmDisable}>
-                            Disable Access
+                            {t('Disable Access')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>

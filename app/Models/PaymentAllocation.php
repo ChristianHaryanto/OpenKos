@@ -2,11 +2,15 @@
 
 namespace App\Models;
 
+use App\Concerns\SerializesDatesWithTimezone;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class PaymentAllocation extends Model
 {
+    use HasFactory, SerializesDatesWithTimezone;
+
     protected $fillable = [
         'payment_id',
         'invoice_id',
@@ -16,7 +20,7 @@ class PaymentAllocation extends Model
     protected function casts(): array
     {
         return [
-            'amount' => 'decimal:2',
+            'amount' => 'decimal:3',
         ];
     }
 

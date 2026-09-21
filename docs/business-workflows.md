@@ -164,7 +164,8 @@ app/
 
 | Workflow            | Controller                                              | Action              | Data                | Result                | Business                                             |
 | ------------------- | ------------------------------------------------------- | ------------------- | ------------------- | --------------------- | ---------------------------------------------------- |
-| Create Lease        | `LeaseController::store()`                              | `CreateLease`       | `CreateLeaseData`   | —                     | `OccupancyCalculator`                                |
+| Create Unit Lease   | `LeaseController::store()`                              | `CreateLease`       | `CreateLeaseData`   | —                     | `OccupancyCalculator`                                |
+| Create Whole-Property Lease | `LeaseController::storeForProperty()`             | `CreateLease`       | `CreateLeaseData`   | —                     | —                                                    |
 | Renew Lease         | `LeaseController::renew()`                              | `RenewLease`        | `RenewLeaseData`    | `RenewLeaseResult`    | `RenewalEligibilityChecker`, `LeaseFinancialChecker` |
 | Move Out / Transfer | `LeaseController::moveOut()`, `LeaseController::move()` | `MoveOutLease`      | `MoveOutLeaseData`  | `MoveOutLeaseResult`  | `OccupancyCalculator`                                |
 | Record Payment      | `PaymentController::store()`                            | `RecordPayment`     | `RecordPaymentData` | `RecordPaymentResult` | —                                                    |
@@ -174,11 +175,18 @@ app/
 | Invite Tenant       | `TenantController::invite()`                            | `InviteTenant`      | —                   | —                     | —                                                    |
 | Disable Tenant Access | `TenantController::disableAccess()`                   | `DisableTenantAccess` | —                 | —                     | —                                                    |
 
+`CreateLease` is the shared creation workflow for both targets. It locks the
+Property first, then the Unit when creating a Unit Lease, and applies the
+authoritative active-target conflict rule before selecting rates and creating
+the Lease. Whole-property creation uses a PropertyRate and leaves `unit_id`
+null; Unit creation preserves UnitRate and capacity/co-tenancy behavior.
+Renewal uses the same target conflict rule and locking boundary.
+
 ## Invoice-Centric Billing (ADR-007)
 
 Since [ADR-007](architecture/adr/007-invoice-aggregate.md) the billing chain is `Lease → Invoice → Payment → PaymentProof`:
 
- - `GenerateInvoices` materializes Pending invoices for active leases up to a 2-month horizon. Inside each transaction it checks for an existing invoice before inserting (idempotent via unique `(lease_id, period_start)` index + before-insert existence check). It runs synchronously inside `CreateLease`, `RenewLease`, and the `MoveOutLease` transfer path so invoices exist immediately. Each created invoice dispatches `Invoice\InvoiceGenerated` via `DB::afterCommit()` (true post-commit hook for plugins).
+ - `GenerateInvoices` materializes Pending invoices for active leases up to a 2-month horizon. It locks the selected leases, preflights existing periods, and inserts new invoices and line items in one batch transaction (idempotent via unique `(lease_id, period_start)` index). It runs synchronously inside `CreateLease`, `RenewLease`, and the `MoveOutLease` transfer path so invoices exist immediately. Each created invoice dispatches `Invoice\InvoiceGenerated` via `DB::afterCommit()` (true post-commit hook for plugins).
 - Due dates follow the lease's `billing_strategy`: `advance` (default, due within the billed period) or `arrears` (due one billing period after the period is consumed). Accepted on lease create/update/assign requests; carried over on renewal and unit transfer.
 - `RecordPayment` settles a specific invoice (`invoice_id` in the request), then `Invoice::recalculateStatus()` recomputes `amount_paid` and status (Pending → Partial → Paid) from **confirmed** payments only. Verification (`PaymentController::verify`) triggers the same recompute, so rejecting a payment rolls the invoice status back.
 - Overpayment is rejected at validation (`StorePaymentRequest::ensureInvoiceIsPayable`); partial payments are first-class.

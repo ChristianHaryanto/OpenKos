@@ -117,17 +117,18 @@ New domains should follow the same pattern: pick the layers you need, place file
 ```
 Property (has a type — see below)
   ├── Regions / Cities (location)
+  ├── Whole-property Leases
+  │    ├── Tenants (pivot: lease_tenant)
+  │    └── Invoices → Payments → PaymentProofs
   └── Units
        ├── UnitRates (pricing history)
+       ├── UnitTypeRates (shared defaults; UnitRates override by exact identity)
        ├── LeaseUnitHistory (unit transfer records)
        ├── MaintenanceTickets
-       └── Leases
+       └── Unit Leases
             ├── Tenants (pivot: lease_tenant)
             ├── Invoices
-            │    ├── InvoiceLineItems
-            │    └── Payments
-            │         ├── PaymentAllocations (M:N pivot: payment_id, invoice_id, amount)
-            │         └── PaymentProofs
+            │    └── Payments → PaymentProofs
             └── ReminderLogs
 
 Tenant
@@ -142,6 +143,16 @@ User (identity — backs owner, staff, and tenant accounts)
 ActivityLog (records user-triggered activity across entities)
 AuditLog (records setting changes and sensitive operations)
 ```
+
+Every Lease has direct Property lineage through `leases.property_id`. A Lease
+may additionally target one Unit through `unit_id`; a null Unit means the Lease
+targets the whole Property. See [ADR-009](architecture/adr/009-property-lineage-lease-targets.md).
+
+For hybrid inventory, an active whole-property Lease blocks Unit rental and any
+active Unit Lease blocks a whole-property Lease. Unit-versus-Unit occupancy
+continues to use the existing Unit capacity and co-tenancy rules. Availability
+uses the shared active-Lease semantics and is distinct from Unit operational
+status; whole-property occupancy does not mutate Unit statuses.
 
 ### Property Type
 
@@ -313,6 +324,14 @@ Every foreign key intentionally chooses one of four strategies:
 **Framework pivot tables** (Spatie role/permission assignments, property_user) use `cascadeOnDelete` — they are ephemeral metadata. Domain pivot tables linking business records (e.g. `lease_tenant`) follow the same strategy as the business records they connect.
 
 The full FK inventory with per-constraint rationale is enforced by `tests/Feature/Schema/ForeignKeyDeleteStrategyTest.php`.
+
+### Polymorphic Media Owner IDs
+
+The reusable `media` foundation stores `mediable_id` as an unsigned BIGINT,
+matching the integer primary keys used by current OpenKOS domain models. A
+plugin owner must use a compatible integer key before opting into `HasMedia`.
+UUID or other custom owner keys require a deliberate schema extension rather
+than being silently coerced by the generic media layer.
 
 ### Composite Indexes
 

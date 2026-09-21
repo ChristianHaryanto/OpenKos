@@ -6,6 +6,8 @@ use App\Enums\PaymentStatus;
 use App\Models\Invoice;
 use App\Models\Lease;
 use App\Models\Payment;
+use App\Support\DateTimeFormatter;
+use Brick\Math\BigDecimal;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -17,7 +19,7 @@ class DashboardController extends TenantPortalController
         $tenant = $this->tenant($request);
         $lease = $tenant->leases()
             ->active()
-            ->with('unit.property')
+            ->with(['property', 'unit'])
             ->latest('start_date')
             ->first();
 
@@ -44,17 +46,19 @@ class DashboardController extends TenantPortalController
             'start_date' => $lease->start_date->toDateString(),
             'end_date' => $lease->end_date?->toDateString(),
             'rent_amount' => (string) $lease->rent_amount,
+            'currency' => $lease->currency,
             'billing_label' => $lease->billing_label,
             'status' => $lease->status->value,
+            'target_type' => $lease->target_type,
+            'property' => $lease->property ? [
+                'id' => $lease->property->id,
+                'name' => $lease->property->name,
+                'address' => $lease->property->address,
+            ] : null,
             'unit' => $lease->unit ? [
                 'id' => $lease->unit->id,
                 'name' => $lease->unit->name,
                 'status' => $lease->unit->status->value,
-                'property' => $lease->unit->property ? [
-                    'id' => $lease->unit->property->id,
-                    'name' => $lease->unit->property->name,
-                    'address' => $lease->unit->property->address,
-                ] : null,
             ] : null,
         ];
     }
@@ -95,9 +99,11 @@ class DashboardController extends TenantPortalController
                     'due_date' => $invoice->due_date->toDateString(),
                     'display_status' => $invoice->display_status,
                     'amount' => (string) $invoice->payable_amount,
+                    'currency' => $invoice->currency,
                 ],
                 'pending_payment' => $pendingPayment ? [
                     'amount' => (string) $pendingPayment->amount,
+                    'currency' => $pendingPayment->currency,
                     'payment_date' => $pendingPayment->payment_date->toDateString(),
                 ] : null,
             ];
@@ -108,6 +114,7 @@ class DashboardController extends TenantPortalController
                 'type' => 'payment_verification',
                 'pending_payment' => [
                     'amount' => (string) $pendingPayment->amount,
+                    'currency' => $pendingPayment->currency,
                     'payment_date' => $pendingPayment->payment_date->toDateString(),
                 ],
             ];
@@ -120,7 +127,7 @@ class DashboardController extends TenantPortalController
     {
         if (! $lease) {
             return [
-                'outstanding_balance' => '0',
+                'outstanding_amounts' => [],
                 'payable_invoice_count' => 0,
                 'pending_verification_count' => 0,
                 'next_due_date' => null,
@@ -146,17 +153,27 @@ class DashboardController extends TenantPortalController
         $actionableInvoices = $lease->invoices()
             ->payable()
             ->whereRaw("{$outstandingSql} > ({$pendingPaymentSql})", $pendingPaymentBindings);
-        $summary = (clone $actionableInvoices)
-            ->selectRaw(
-                "COUNT(*) as payable_invoice_count, COALESCE(SUM({$outstandingSql} - ({$pendingPaymentSql})), 0) as outstanding_balance",
-                $pendingPaymentBindings,
-            )
-            ->toBase()
-            ->first();
+        $summaryRows = (clone $actionableInvoices)
+            ->select('invoices.*')
+            ->selectSub($pendingPaymentAmount, 'pending_payment_amount')
+            ->get();
+        $outstandingAmounts = $summaryRows
+            ->groupBy(fn (Invoice $invoice): string => $invoice->currency)
+            ->map(function ($invoices, string $currency): array {
+                $amount = $invoices->reduce(
+                    fn (BigDecimal $total, Invoice $invoice): BigDecimal => $total
+                        ->plus(BigDecimal::of($invoice->outstanding)->minus((string) $invoice->pending_payment_amount)),
+                    BigDecimal::zero(),
+                );
+
+                return ['currency' => $currency, 'amount' => $amount->toString()];
+            })
+            ->values()
+            ->all();
 
         return [
-            'outstanding_balance' => (string) $summary->outstanding_balance,
-            'payable_invoice_count' => (int) $summary->payable_invoice_count,
+            'outstanding_amounts' => $outstandingAmounts,
+            'payable_invoice_count' => $summaryRows->count(),
             'pending_verification_count' => $lease->payments()
                 ->where('payments.status', PaymentStatus::Pending)
                 ->count(),
@@ -183,10 +200,14 @@ class DashboardController extends TenantPortalController
                     PaymentStatus::Confirmed => 'payment_confirmed',
                     PaymentStatus::Cancelled => 'payment_cancelled',
                 },
-                'date' => ($payment->status === PaymentStatus::Pending
-                    ? $payment->payment_date
-                    : $payment->verified_at ?? $payment->updated_at)->toDateString(),
+                'date' => DateTimeFormatter::format(
+                    $payment->status === PaymentStatus::Pending
+                        ? $payment->payment_date
+                        : $payment->verified_at ?? $payment->updated_at,
+                    'Y-m-d',
+                ),
                 'amount' => (string) $payment->amount,
+                'currency' => $payment->currency,
                 'reference' => $payment->invoice?->reference,
             ]);
         $invoiceActivity = $lease->invoices()
@@ -195,17 +216,19 @@ class DashboardController extends TenantPortalController
             ->get(['id', 'reference', 'created_at'])
             ->map(fn (Invoice $invoice) => [
                 'type' => 'invoice_issued',
-                'date' => $invoice->created_at->toDateString(),
+                'date' => DateTimeFormatter::format($invoice->created_at, 'Y-m-d'),
                 'amount' => null,
+                'currency' => $invoice->currency,
                 'reference' => $invoice->reference,
             ]);
         $leaseActivity = collect([[
             'type' => 'lease_started',
             'date' => $lease->start_date->toDateString(),
             'amount' => null,
+            'currency' => $lease->currency,
             'reference' => trim(implode(' · ', array_filter([
-                $lease->unit?->name,
-                $lease->unit?->property?->name,
+                $lease->target_type === 'whole_property' ? 'Entire property' : $lease->unit?->name,
+                $lease->property?->name,
             ]))),
         ]]);
 

@@ -5,6 +5,7 @@ import {
     BellRing,
     Blocks,
     Building2,
+    Info,
     KeyRound,
     Mail,
     MessageCircle,
@@ -38,6 +39,7 @@ const settingsGroupIconMap: Record<string, LucideIcon> = {
 };
 
 const settingsPageIconMap: Record<string, LucideIcon> = {
+    about: Info,
     general: Settings,
     profile: User,
     security: KeyRound,
@@ -46,6 +48,7 @@ const settingsPageIconMap: Record<string, LucideIcon> = {
     mail: Mail,
     whatsapp: MessageCircle,
     'payment-gateway': Plug,
+    plugins: Puzzle,
 };
 
 export function canSee(permission: string | null, auth: Auth): boolean {

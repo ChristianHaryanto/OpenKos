@@ -10,9 +10,13 @@ use App\Models\Payment;
 use App\Models\PaymentProof;
 use App\Models\Property;
 use App\Models\ReminderLog;
+use App\Services\Payments\MoneyConverter;
+use App\Support\DateTimeFormatter;
 use App\Tables\Column;
 use App\Tables\Filter;
 use App\Tables\Table;
+use Brick\Math\BigDecimal;
+use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -23,7 +27,7 @@ use Inertia\Response;
 
 class RentController extends Controller
 {
-    public function __invoke(Request $request): Response
+    public function __invoke(Request $request, MoneyConverter $money): Response
     {
         $now = now();
 
@@ -35,28 +39,73 @@ class RentController extends Controller
             ->pluck('id');
 
         $urgency = $request->query('urgency', '');
+        $today = $now->toDateString();
+        $tomorrow = $now->copy()->addDay()->toDateString();
+        $payableStatuses = [
+            InvoiceStatus::Pending->value,
+            InvoiceStatus::Partial->value,
+        ];
+
+        $invoiceScope = Invoice::query()
+            ->whereHas('lease', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds));
+
+        $invoiceTable = DB::getQueryGrammar()->wrap((new Invoice)->getTable());
+        $paymentTable = DB::getQueryGrammar()->wrap((new Payment)->getTable());
+        $pendingPaymentsAlias = DB::getQueryGrammar()->wrap('pending_payments');
 
         // --- Tab counts ---
 
+        $invoiceStats = (clone $invoiceScope)->selectRaw(
+            <<<SQL
+            COALESCE(SUM(CASE
+                WHEN {$invoiceTable}.due_date < ? AND {$invoiceTable}.status IN (?, ?)
+                THEN 1 ELSE 0
+            END), 0) AS overdue,
+            COALESCE(SUM(CASE
+                WHEN {$invoiceTable}.due_date >= ?
+                    AND {$invoiceTable}.due_date < ?
+                    AND {$invoiceTable}.status IN (?, ?)
+                THEN 1 ELSE 0
+            END), 0) AS due_today,
+            COALESCE(SUM(CASE
+                WHEN {$invoiceTable}.due_date >= ? AND {$invoiceTable}.status IN (?, ?)
+                THEN 1 ELSE 0
+            END), 0) AS upcoming,
+            COALESCE(SUM(CASE
+                WHEN {$invoiceTable}.status = ?
+                THEN 1 ELSE 0
+            END), 0) AS partial,
+            COALESCE(SUM(CASE
+                WHEN {$invoiceTable}.status = ?
+                THEN 1 ELSE 0
+            END), 0) AS paid,
+            COALESCE(SUM(CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM {$paymentTable} AS {$pendingPaymentsAlias}
+                    WHERE {$pendingPaymentsAlias}.invoice_id = {$invoiceTable}.id
+                        AND {$pendingPaymentsAlias}.status = ?
+                )
+                THEN 1 ELSE 0
+            END), 0) AS pending_review
+            SQL,
+            [
+                $today, ...$payableStatuses,
+                $today, $tomorrow, ...$payableStatuses,
+                $tomorrow, ...$payableStatuses,
+                InvoiceStatus::Partial->value,
+                InvoiceStatus::Paid->value,
+                PaymentStatus::Pending->value,
+            ],
+        )->first();
+
         $tabCounts = [
-            'overdue' => $this->countPayable($accessiblePropertyIds, $now, '<'),
-            'due_today' => $this->countPayable($accessiblePropertyIds, $now, '='),
-            'upcoming' => $this->countPayable($accessiblePropertyIds, $now, '>'),
-            'partial' => Invoice::query()
-                ->where('status', InvoiceStatus::Partial->value)
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-                ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
-                ->count(),
-            'paid' => Invoice::query()
-                ->where('status', InvoiceStatus::Paid->value)
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-                ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
-                ->count(),
-            'pending_review' => Invoice::query()
-                ->whereHas('payments', fn (Builder $q) => $q->where('status', PaymentStatus::Pending->value))
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-                ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
-                ->count(),
+            'overdue' => (int) ($invoiceStats?->overdue ?? 0),
+            'due_today' => (int) ($invoiceStats?->due_today ?? 0),
+            'upcoming' => (int) ($invoiceStats?->upcoming ?? 0),
+            'partial' => (int) ($invoiceStats?->partial ?? 0),
+            'paid' => (int) ($invoiceStats?->paid ?? 0),
+            'pending_review' => (int) ($invoiceStats?->pending_review ?? 0),
         ];
 
         // --- Outstanding card ---
@@ -64,28 +113,45 @@ class RentController extends Controller
         $outstandingCount = $tabCounts['overdue'] + $tabCounts['due_today'] + $tabCounts['upcoming'];
         $tabCounts['all'] = $outstandingCount;
 
-        $outstandingAmount = (int) Invoice::query()
-            ->payable()
-            ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-            ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
-            ->sum(DB::raw('total - amount_paid'));
+        $outstandingInvoices = (clone $invoiceScope)
+            ->whereIn('status', $payableStatuses)
+            ->get(['currency', 'total', 'amount_paid']);
+        $outstandingAmounts = $this->aggregateMoney(
+            $outstandingInvoices,
+            fn (Invoice $invoice): string => BigDecimal::of((string) $invoice->total)
+                ->minus((string) $invoice->amount_paid)
+                ->toString(),
+        );
 
         // --- Progress ---
 
         $progressTotal = $outstandingCount + $tabCounts['paid'];
 
-        $collectedAmount = (int) Payment::where('status', PaymentStatus::Confirmed->value)
+        $paymentStats = Payment::query()
+            ->where('status', PaymentStatus::Confirmed->value)
             ->whereHas('invoice', fn (Builder $q) => $q
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-                ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds)))
-            ->sum('amount');
-
-        $lastPayment = Payment::where('status', PaymentStatus::Confirmed->value)
-            ->whereHas('invoice', fn (Builder $q) => $q
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-                ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds)))
-            ->latest('payment_date')
-            ->first();
+                ->whereHas('lease', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds)))
+            ->selectRaw(
+                'COALESCE(currency, ?) as currency, COALESCE(SUM(amount), 0) as amount, MAX(payment_date) as last_payment_at',
+                [$money->normalizeCurrency()],
+            )
+            ->groupByRaw('COALESCE(currency, ?)', [$money->normalizeCurrency()])
+            ->toBase()
+            ->get();
+        $collectedAmounts = $paymentStats
+            ->map(fn (object $payment): array => [
+                'currency' => (string) $payment->currency,
+                'amount' => (string) $payment->amount,
+            ])
+            ->values()
+            ->all();
+        $currencies = collect([
+            ...$outstandingAmounts,
+            ...$collectedAmounts,
+        ])->pluck('currency')->unique()->values();
+        $outstandingAmounts = $this->completeMoneyGroups($outstandingAmounts, $currencies);
+        $lastPaymentDate = $paymentStats->pluck('last_payment_at')->filter()->max();
+        $lastPaymentAt = $lastPaymentDate ? Carbon::parse($lastPaymentDate)->toDateString() : null;
 
         // --- Queue table ---
 
@@ -93,19 +159,18 @@ class RentController extends Controller
         $isPartialTab = $urgency === 'partial';
         $isPendingReviewTab = $urgency === 'pending_review';
 
-        $queueQuery = Invoice::query()
+        $queueQuery = (clone $invoiceScope)
             ->with([
                 'lease.primaryTenant',
                 'lease.tenants',
-                'lease.unit.property',
+                'lease.property',
+                'lease.unit',
                 'lineItems',
                 'payments' => fn ($q) => $q
-                    ->with(['confirmedBy:id,name', 'proofs'])
+                    ->with(['confirmedBy:id,name', 'proofs.media'])
                     ->latest('payment_date')
                     ->latest('id'),
-            ])
-            ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-            ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds));
+            ]);
 
         if ($isPendingReviewTab) {
             $queueQuery->whereHas('payments', fn (Builder $q) => $q->where('status', PaymentStatus::Pending->value));
@@ -124,7 +189,9 @@ class RentController extends Controller
                     $q->whereHas('lease.tenants', function (Builder $q) use ($search): void {
                         $q->whereRaw('lower(name) like ?', ['%'.mb_strtolower($search).'%']);
                     })->orWhereHas('lease', function (Builder $q) use ($search): void {
-                        $q->whereHas('unit', function (Builder $q) use ($search): void {
+                        $q->whereHas('property', function (Builder $q) use ($search): void {
+                            $q->whereRaw('lower(name) like ?', ['%'.mb_strtolower($search).'%']);
+                        })->orWhereHas('unit', function (Builder $q) use ($search): void {
                             $q->whereRaw('lower(name) like ?', ['%'.mb_strtolower($search).'%']);
                         });
                     });
@@ -167,7 +234,7 @@ class RentController extends Controller
                         ->all();
                 })
                     ->query(fn (Builder $q, string $value) => $q->whereHas(
-                        'lease.unit',
+                        'lease',
                         fn (Builder $q) => $q->whereIn('property_id', explode(',', $value)),
                     )),
             ])
@@ -185,16 +252,17 @@ class RentController extends Controller
         // --- Recent Payments ---
 
         $recentPayments = Payment::with([
-            'invoice' => fn ($q) => $q->with(['lease.primaryTenant', 'lease.tenants', 'lease.unit.property']),
+            'invoice' => fn ($q) => $q->with(['lease.primaryTenant', 'lease.tenants', 'lease.property', 'lease.unit']),
         ])
             ->where('status', PaymentStatus::Confirmed->value)
-            ->whereHas('invoice.lease.unit', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
+            ->whereHas('invoice.lease', fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds))
             ->latest('payment_date')
             ->limit(10)
             ->get()
             ->map(fn (Payment $p) => [
                 'id' => $p->id,
                 'amount' => (string) $p->amount,
+                'currency' => $p->currency,
                 'payment_date' => $p->payment_date->toDateString(),
                 'payment_method' => $p->payment_method,
                 'tenant_name' => $p->invoice?->lease?->tenants?->pluck('name')->join(', ')
@@ -208,11 +276,8 @@ class RentController extends Controller
 
         $recentReminders = ReminderLog::with(['lease.primaryTenant', 'lease.tenants'])
             ->whereHas('lease', fn (Builder $q) => $q
-                ->where('status', 'active')
-                ->whereHas(
-                    'unit',
-                    fn (Builder $q) => $q->whereIn('property_id', $accessiblePropertyIds),
-                ))
+                ->active()
+                ->whereIn('property_id', $accessiblePropertyIds))
             ->latest('sent_at')
             ->limit(10)
             ->get()
@@ -224,7 +289,7 @@ class RentController extends Controller
                 'reminder_type' => $r->reminder_type,
                 'channel' => $r->channel,
                 'scheduled_for' => $r->scheduled_for?->toDateString(),
-                'sent_at' => $r->sent_at?->toDateTimeString() ?? null,
+                'sent_at' => DateTimeFormatter::nullableIso($r->sent_at),
                 'overdue_days' => $r->overdue_days,
             ]);
 
@@ -232,35 +297,18 @@ class RentController extends Controller
             ...$needsAttention,
             'outstanding' => [
                 'count' => $outstandingCount,
-                'amount' => $outstandingAmount,
+                'amounts' => $outstandingAmounts,
             ],
             'tab_counts' => $tabCounts,
             'progress' => [
                 'processed' => $tabCounts['paid'],
                 'total' => $progressTotal,
-                'amount_collected' => $collectedAmount,
-                'last_payment_at' => $lastPayment?->payment_date?->toDateTimeString() ?? null,
+                'amount_collected' => $collectedAmounts,
+                'last_payment_at' => $lastPaymentAt,
             ],
             'recent_payments' => $recentPayments,
             'recent_reminders' => $recentReminders,
         ]);
-    }
-
-    private function countPayable(Collection $propertyIds, CarbonInterface $now, string $operator): int
-    {
-        $query = Invoice::query()
-            ->payable()
-            ->whereHas('lease', fn (Builder $q) => $q->where('status', 'active'))
-            ->whereHas('lease.unit', fn (Builder $q) => $q->whereIn('property_id', $propertyIds));
-
-        match ($operator) {
-            '<' => $query->whereDate('due_date', '<', $now->toDateString()),
-            '=' => $query->whereDate('due_date', '=', $now->toDateString()),
-            '>' => $query->whereDate('due_date', '>', $now->toDateString()),
-            default => null,
-        };
-
-        return $query->count();
     }
 
     private function transformInvoice(Invoice $invoice, CarbonInterface $now): array
@@ -288,8 +336,9 @@ class RentController extends Controller
             'lease_reference' => $lease->reference,
             'primary_tenant_id' => $lease->primary_tenant_id,
             'tenant_name' => $tenants->pluck('name')->join(', ') ?: ($lease->primaryTenant?->name ?? '—'),
+            'target_type' => $lease->target_type,
             'unit_name' => $unit?->name ?? '—',
-            'property_name' => $unit?->property?->name ?? '—',
+            'property_name' => $lease->property?->name ?? '—',
             'reference' => $invoice->reference,
             'period_start' => $invoice->period_start->toDateString(),
             'period_end' => $invoice->period_end->toDateString(),
@@ -297,6 +346,7 @@ class RentController extends Controller
             'total' => (string) $invoice->total,
             'amount_paid' => (string) $invoice->amount_paid,
             'outstanding' => $invoice->outstanding,
+            'currency' => $invoice->currency,
             'days_overdue' => $daysOverdue,
             'urgency' => $urgency,
             'status' => $invoice->status->value,
@@ -314,6 +364,7 @@ class RentController extends Controller
                 'id' => $payment->id,
                 'invoice_id' => $payment->invoice_id,
                 'amount' => (string) $payment->amount,
+                'currency' => $payment->currency,
                 'payment_date' => $payment->payment_date->toDateString(),
                 'payment_method' => $payment->payment_method,
                 'reference' => $payment->reference_number,
@@ -328,16 +379,50 @@ class RentController extends Controller
                 'recorded_by_user' => null,
                 'verified_by' => $payment->verified_by,
                 'verified_by_user' => null,
-                'verified_at' => $payment->verified_at?->toDateTimeString(),
+                'verified_at' => DateTimeFormatter::nullableIso($payment->verified_at),
                 'proofs' => $payment->proofs->map(fn (PaymentProof $proof) => [
                     'id' => $proof->id,
                     'payment_id' => $proof->payment_id,
-                    'path' => $proof->path,
                     'original_name' => $proof->original_name,
                     'mime_type' => $proof->mime_type,
-                    'created_at' => $proof->created_at->toDateTimeString(),
+                    'created_at' => DateTimeFormatter::iso($proof->created_at),
                 ])->values()->all(),
             ])->values()->all(),
         ];
+    }
+
+    /**
+     * @param  Collection<int, Invoice|Payment>  $rows
+     * @return array<int, array{currency: string, amount: string}>
+     */
+    private function aggregateMoney(Collection $rows, callable $amount): array
+    {
+        return $rows
+            ->groupBy(fn (Invoice|Payment $row): string => $row->currency)
+            ->map(function ($rows, string $currency) use ($amount): array {
+                $total = $rows->reduce(
+                    fn (BigDecimal $total, Invoice|Payment $row): BigDecimal => $total->plus($amount($row)),
+                    BigDecimal::zero(),
+                );
+
+                return ['currency' => $currency, 'amount' => $total->toString()];
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<int, array{currency: string, amount: string}>  $groups
+     * @param  Collection<int, string>  $currencies
+     * @return array<int, array{currency: string, amount: string}>
+     */
+    private function completeMoneyGroups(array $groups, Collection $currencies): array
+    {
+        $groupsByCurrency = collect($groups)->keyBy('currency');
+
+        return $currencies->map(fn (string $currency): array => [
+            'currency' => $currency,
+            'amount' => ($groupsByCurrency->get($currency) ?? ['amount' => BigDecimal::zero()->toString()])['amount'],
+        ])->all();
     }
 }

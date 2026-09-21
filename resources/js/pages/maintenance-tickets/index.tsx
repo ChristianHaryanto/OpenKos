@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/select';
 import { useTable } from '@/hooks/use-table';
 import { formatDate } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import maintenanceTickets from '@/routes/maintenance-tickets';
 import type { PaginatedData, TableFilterMeta } from '@/types';
 import type { MaintenanceTicket } from '@/types';
@@ -65,6 +66,7 @@ export default function Index({
     tickets: data,
     properties,
     units,
+    transferUnits,
     users,
     can,
     table: tableMeta,
@@ -78,6 +80,15 @@ export default function Index({
     tickets: PaginatedData<MaintenanceTicket>;
     properties: { id: number; name: string }[];
     units: {
+        id: number;
+        name: string;
+        property_id: number;
+        status: string;
+        active_lease_count: number;
+        has_maintenance_transfer?: number;
+        leases?: { tenants: { id: number; name: string }[] }[];
+    }[];
+    transferUnits: {
         id: number;
         name: string;
         property_id: number;
@@ -155,35 +166,35 @@ export default function Index({
     const columns: TableColumn<MaintenanceTicket>[] = [
         {
             key: 'reference',
-            label: 'ID',
+            label: t('ID'),
             className: 'text-muted-foreground text-xs font-mono',
             render: (ticket) => ticket.reference ?? `#${ticket.id}`,
         },
-        { key: 'title', label: 'Title', sortable: true },
+        { key: 'title', label: t('Title'), sortable: true },
         {
             key: 'property_name',
-            label: 'Property',
+            label: t('Property'),
             sortable: true,
             render: (ticket) => ticket.property?.name ?? '—',
         },
         {
             key: 'location',
-            label: 'Location',
+            label: t('Location'),
             render: (ticket) => ticket.unit?.name ?? ticket.location ?? '—',
         },
         {
             key: 'priority',
-            label: 'Priority',
+            label: t('Priority'),
             sortable: true,
             render: (ticket) => (
                 <Badge className={priorityColors[ticket.priority] ?? ''}>
-                    {priorityLabel[ticket.priority] ?? ticket.priority}
+                    {t(priorityLabel[ticket.priority] ?? ticket.priority)}
                 </Badge>
             ),
         },
         {
             key: 'status',
-            label: 'Status',
+            label: t('Status'),
             sortable: true,
             render: (ticket) => (
                 <StatusBadge domain="maintenance" value={ticket.status} />
@@ -191,12 +202,12 @@ export default function Index({
         },
         {
             key: 'assigned_to',
-            label: 'Assigned To',
+            label: t('Assigned To'),
             render: (ticket) => ticket.assignee?.name ?? '—',
         },
         {
             key: 'created_at',
-            label: 'Created',
+            label: t('Created'),
             sortable: true,
             render: (ticket) => formatDate(ticket.created_at),
         },
@@ -225,7 +236,7 @@ export default function Index({
                             }
                         >
                             <Eye className="size-4" />
-                            Open
+                            {t('Open')}
                         </DropdownMenuItem>
                         {ticket.status === 'reported' && can.update && (
                             <DropdownMenuItem
@@ -234,7 +245,7 @@ export default function Index({
                                 }
                             >
                                 <Play className="size-4" />
-                                Start
+                                {t('Start')}
                             </DropdownMenuItem>
                         )}
                         {ticket.status === 'in_progress' && can.update && (
@@ -244,7 +255,7 @@ export default function Index({
                                 }
                             >
                                 <Check className="size-4" />
-                                Resolve
+                                {t('Resolve')}
                             </DropdownMenuItem>
                         )}
                         {(ticket.status === 'reported' ||
@@ -256,7 +267,7 @@ export default function Index({
                                     }
                                 >
                                     <Ban className="size-4" />
-                                    Cancel
+                                    {t('Cancel')}
                                 </DropdownMenuItem>
                             )}
                         {can.update && <DropdownMenuSeparator />}
@@ -265,7 +276,7 @@ export default function Index({
                                 onClick={() => handleAssignToMe(ticket)}
                             >
                                 <UserPlus className="size-4" />
-                                Assign to me
+                                {t('Assign to me')}
                             </DropdownMenuItem>
                         )}
                         {can.assign && (
@@ -276,7 +287,7 @@ export default function Index({
                                 }}
                             >
                                 <UserPlus className="size-4" />
-                                Assign to...
+                                {t('Assign to...')}
                             </DropdownMenuItem>
                         )}
                         {(can.update || can.delete) && (
@@ -290,7 +301,7 @@ export default function Index({
                                 }}
                             >
                                 <Pencil className="size-4" />
-                                Edit
+                                {t('Edit')}
                             </DropdownMenuItem>
                         )}
                         {can.delete && (
@@ -299,7 +310,7 @@ export default function Index({
                                 onClick={() => setDeleteConfirm(ticket)}
                             >
                                 <Trash2 className="size-4 text-red-600" />
-                                Delete
+                                {t('Delete')}
                             </DropdownMenuItem>
                         )}
                     </DropdownMenuContent>
@@ -310,13 +321,13 @@ export default function Index({
 
     return (
         <>
-            <Head title="Maintenance Tickets" />
+            <Head title={t('Maintenance Tickets')} />
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <div className="flex items-center justify-between">
                     <Heading
-                        title="Maintenance Tickets"
-                        description="Track and manage maintenance issues."
+                        title={t('Maintenance Tickets')}
+                        description={t('Track and manage maintenance issues.')}
                     />
                     {can.create && (
                         <Button
@@ -325,7 +336,7 @@ export default function Index({
                                 setFormOpen(true);
                             }}
                         >
-                            New Ticket
+                            {t('New Ticket')}
                         </Button>
                     )}
                 </div>
@@ -341,7 +352,7 @@ export default function Index({
                             value={table.searchValue}
                             onChange={table.onSearchChange}
                             onClear={table.clearSearch}
-                            placeholder="Search tickets..."
+                            placeholder={t('Search tickets...')}
                         />
                     }
                 />
@@ -356,10 +367,12 @@ export default function Index({
                     onPageChange={table.goToPage}
                     onPerPageChange={table.setPerPage}
                     onRowClick={(ticket) => setDetailTicket(ticket)}
-                    noun="tickets"
+                    noun={t('tickets')}
                     empty={{
-                        message: 'No maintenance tickets yet.',
-                        createLabel: can.create ? 'Report an issue' : undefined,
+                        message: t('No maintenance tickets yet.'),
+                        createLabel: can.create
+                            ? t('Report an issue')
+                            : undefined,
                         onCreate: can.create
                             ? () => {
                                   setFormOpen(true);
@@ -381,6 +394,7 @@ export default function Index({
                     ticket={editingTicket}
                     properties={properties}
                     units={units}
+                    transferUnits={transferUnits}
                 />
 
                 <TicketDetailSheet
@@ -412,10 +426,11 @@ export default function Index({
                 >
                     <DialogContent className="sm:max-w-md">
                         <DialogHeader>
-                            <DialogTitle>Restore Occupant?</DialogTitle>
+                            <DialogTitle>{t('Restore Occupant?')}</DialogTitle>
                             <DialogDescription>
-                                This unit was vacated for maintenance. Move the
-                                occupant back?
+                                {t(
+                                    'This unit was vacated for maintenance. Move the occupant back?',
+                                )}
                             </DialogDescription>
                         </DialogHeader>
                         <DialogFooter>
@@ -438,7 +453,7 @@ export default function Index({
                                     }
                                 }}
                             >
-                                Keep in current unit
+                                {t('Keep in current unit')}
                             </Button>
                             <Button
                                 onClick={() => {
@@ -459,7 +474,7 @@ export default function Index({
                                     }
                                 }}
                             >
-                                Move back
+                                {t('Move back')}
                             </Button>
                         </DialogFooter>
                     </DialogContent>
@@ -471,14 +486,14 @@ export default function Index({
                 >
                     <DialogContent>
                         <DialogHeader>
-                            <DialogTitle>Delete ticket</DialogTitle>
+                            <DialogTitle>{t('Delete ticket')}</DialogTitle>
                             <DialogDescription>
                                 Delete{' '}
                                 <span className="font-medium">
                                     {deleteConfirm?.reference ??
                                         `#${deleteConfirm?.id}`}
                                 </span>
-                                ? This cannot be undone.
+                                ? {t('This cannot be undone.')}
                             </DialogDescription>
                         </DialogHeader>
                         <DialogFooter>
@@ -486,7 +501,7 @@ export default function Index({
                                 variant="outline"
                                 onClick={() => setDeleteConfirm(null)}
                             >
-                                Cancel
+                                {t('Cancel')}
                             </Button>
                             <Button
                                 variant="destructive"
@@ -503,7 +518,7 @@ export default function Index({
                                     }
                                 }}
                             >
-                                Delete
+                                {t('Delete')}
                             </Button>
                         </DialogFooter>
                     </DialogContent>
@@ -518,9 +533,11 @@ export default function Index({
                 >
                     <DialogContent className="sm:max-w-sm">
                         <DialogHeader>
-                            <DialogTitle>Assign Ticket</DialogTitle>
+                            <DialogTitle>{t('Assign Ticket')}</DialogTitle>
                             <DialogDescription>
-                                Select a staff member to assign this ticket to.
+                                {t(
+                                    'Select a staff member to assign this ticket to.',
+                                )}
                             </DialogDescription>
                         </DialogHeader>
                         <div className="py-4">
@@ -529,7 +546,9 @@ export default function Index({
                                 onValueChange={setAssigneeId}
                             >
                                 <SelectTrigger className="w-full">
-                                    <SelectValue placeholder="Select staff..." />
+                                    <SelectValue
+                                        placeholder={t('Select staff...')}
+                                    />
                                 </SelectTrigger>
                                 <SelectContent>
                                     {users
@@ -561,7 +580,7 @@ export default function Index({
                                     setAssigneeId('');
                                 }}
                             >
-                                Cancel
+                                {t('Cancel')}
                             </Button>
                             <Button
                                 disabled={!assigneeId}
@@ -582,7 +601,7 @@ export default function Index({
                                     }
                                 }}
                             >
-                                Assign
+                                {t('Assign')}
                             </Button>
                         </DialogFooter>
                     </DialogContent>

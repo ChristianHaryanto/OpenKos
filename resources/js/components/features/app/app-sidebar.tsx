@@ -1,15 +1,20 @@
 import { Link, usePage } from '@inertiajs/react';
 import {
     Building2,
+    ClipboardCheck,
     DollarSign,
     FileText,
     Landmark,
     LayoutGrid,
+    ListChecks,
     Receipt,
+    ReceiptText,
     Shield,
+    Sparkles,
     Tags,
     UserCog,
     Users,
+    WalletCards,
     Wrench,
 } from 'lucide-react';
 import AppLogo from '@/components/features/app/app-logo';
@@ -27,7 +32,13 @@ import {
 } from '@/components/ui/sidebar';
 import { platformNavItems, platformPageNavItems } from '@/lib/platform';
 import { dashboard } from '@/routes';
-import { rent as dashboardRent } from '@/routes/dashboard';
+import {
+    financial as dashboardFinancial,
+    rent as dashboardRent,
+} from '@/routes/dashboard';
+import expenses from '@/routes/expenses';
+import recurringExpenses from '@/routes/expenses/recurring';
+import inspections from '@/routes/inspections';
 import leases from '@/routes/leases';
 import maintenanceTickets from '@/routes/maintenance-tickets';
 import { dashboard as portalDashboard } from '@/routes/portal';
@@ -35,6 +46,8 @@ import { index as portalBilling } from '@/routes/portal/billing';
 import { index as portalLease } from '@/routes/portal/lease';
 import properties from '@/routes/properties';
 import roles from '@/routes/roles';
+import amenities from '@/routes/settings/amenities';
+import expenseCategories from '@/routes/settings/expense-categories';
 import propertyTypes from '@/routes/settings/property-types';
 import tenants from '@/routes/tenants';
 import userRoutes from '@/routes/users';
@@ -47,7 +60,16 @@ export function AppSidebar() {
     const permissions = auth.permissions;
     const isOwner = auth.role === 'owner';
     const home = auth.tenant ? portalDashboard() : dashboard();
-    const settingsNavItems = platformPageNavItems(platform.settings, auth);
+    const settingsNavItems: NavItem[] = [
+        ...platformPageNavItems(
+            platform.settings.filter((page) => page.key !== 'about'),
+            auth,
+        ),
+        ...platformPageNavItems(
+            platform.settings.filter((page) => page.key === 'about'),
+            auth,
+        ),
+    ];
 
     const navSections: NavSection[] = auth.tenant
         ? [
@@ -83,41 +105,61 @@ export function AppSidebar() {
               },
           ]
         : [
-              ...(isOwner || permissions.includes('dashboard.view')
+              ...(isOwner ||
+              permissions.includes('dashboard.view') ||
+              permissions.includes('financials.view')
                   ? [
                         {
                             title: 'OVERVIEW',
                             items: [
-                                {
-                                    title: 'Dashboard',
-                                    icon: LayoutGrid,
-                                    href: dashboard(),
-                                    ...(platformPageNavItems(
-                                        platform.dashboard,
-                                        auth,
-                                    ).length > 0
-                                        ? {
-                                              children: [
-                                                  {
-                                                      title: 'Overview',
-                                                      icon: LayoutGrid,
-                                                      href: dashboard(),
-                                                  },
-                                                  ...platformPageNavItems(
-                                                      platform.dashboard,
-                                                      auth,
-                                                  ),
-                                              ],
-                                          }
-                                        : {}),
-                                },
+                                ...(isOwner ||
+                                permissions.includes('dashboard.view')
+                                    ? [
+                                          {
+                                              title: 'Dashboard',
+                                              icon: LayoutGrid,
+                                              href: dashboard(),
+                                              ...(platformPageNavItems(
+                                                  platform.dashboard,
+                                                  auth,
+                                              ).length > 0
+                                                  ? {
+                                                        children: [
+                                                            {
+                                                                title: 'Overview',
+                                                                icon: LayoutGrid,
+                                                                href: dashboard(),
+                                                            },
+                                                            ...platformPageNavItems(
+                                                                platform.dashboard,
+                                                                auth,
+                                                            ),
+                                                        ],
+                                                    }
+                                                  : {}),
+                                          },
+                                      ]
+                                    : []),
+                                ...(isOwner ||
+                                permissions.includes('financials.view')
+                                    ? [
+                                          {
+                                              title: 'Financial Dashboard',
+                                              icon: Landmark,
+                                              href: dashboardFinancial(),
+                                          },
+                                      ]
+                                    : []),
                             ],
                         },
                     ]
                   : []),
               ...(isOwner ||
               permissions.includes('dashboard.view') ||
-              permissions.includes('maintenance-tickets.view')
+              permissions.includes('maintenance-tickets.view') ||
+              permissions.includes('expenses.view') ||
+              permissions.includes('inspections.view') ||
+              permissions.includes('inspection-templates.manage')
                   ? [
                         {
                             title: 'DAILY OPERATIONS',
@@ -139,6 +181,74 @@ export function AppSidebar() {
                                               title: 'Maintenance',
                                               href: maintenanceTickets.index(),
                                               icon: Wrench,
+                                          },
+                                      ]
+                                    : []),
+                                ...(isOwner ||
+                                permissions.includes('expenses.view')
+                                    ? [
+                                          {
+                                              title: 'Expenses',
+                                              icon: WalletCards,
+                                              children: [
+                                                  {
+                                                      title: 'All Expenses',
+                                                      href: expenses.index(),
+                                                      icon: ReceiptText,
+                                                  },
+                                                  {
+                                                      title: 'Recurring Expenses',
+                                                      href: recurringExpenses.index(),
+                                                      icon: ReceiptText,
+                                                  },
+                                                  ...(isOwner
+                                                      ? [
+                                                            {
+                                                                title: 'Expense Categories',
+                                                                href: expenseCategories.index(),
+                                                                icon: Tags,
+                                                            },
+                                                        ]
+                                                      : []),
+                                              ],
+                                          },
+                                      ]
+                                    : []),
+                                ...(isOwner ||
+                                permissions.includes('inspections.view') ||
+                                permissions.includes(
+                                    'inspection-templates.manage',
+                                )
+                                    ? [
+                                          {
+                                              title: 'Inspections',
+                                              icon: ClipboardCheck,
+                                              children: [
+                                                  ...(isOwner ||
+                                                  permissions.includes(
+                                                      'inspections.view',
+                                                  )
+                                                      ? [
+                                                            {
+                                                                title: 'All Inspections',
+                                                                href: inspections.index(),
+                                                                icon: ListChecks,
+                                                            },
+                                                        ]
+                                                      : []),
+                                                  ...(isOwner ||
+                                                  permissions.includes(
+                                                      'inspection-templates.manage',
+                                                  )
+                                                      ? [
+                                                            {
+                                                                title: 'Templates',
+                                                                href: inspections.templates.index(),
+                                                                icon: ClipboardCheck,
+                                                            },
+                                                        ]
+                                                      : []),
+                                              ],
                                           },
                                       ]
                                     : []),
@@ -173,6 +283,11 @@ export function AppSidebar() {
                                                                 title: 'Property Types',
                                                                 href: propertyTypes.index(),
                                                                 icon: Tags,
+                                                            },
+                                                            {
+                                                                title: 'Amenities',
+                                                                href: amenities.index(),
+                                                                icon: Sparkles,
                                                             },
                                                         ]
                                                       : []),

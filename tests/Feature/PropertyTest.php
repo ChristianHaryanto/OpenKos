@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\PropertyRentalMode;
 use App\Models\City;
 use App\Models\Lease;
 use App\Models\Property;
@@ -8,6 +9,7 @@ use App\Models\Unit;
 use App\Models\User;
 use Database\Seeders\RegionAndCitySeeder;
 use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Support\Facades\DB;
 
 uses()->beforeEach(function () {
     $this->seed([RoleAndPermissionSeeder::class, RegionAndCitySeeder::class]);
@@ -54,7 +56,9 @@ describe('authorization', function () {
 describe('CRUD', function () {
     it('lists properties on the index page', function () {
         $user = User::factory()->owner()->create();
-        Property::factory()->count(3)->create();
+        Property::factory()->create(['name' => 'Alpha Residence']);
+        Property::factory()->create(['name' => 'Beta Residence']);
+        $villa = Property::factory()->create(['name' => 'Villa Bali', 'type' => 'villa']);
 
         $this->actingAs($user)
             ->get(route('properties.index'))
@@ -62,7 +66,56 @@ describe('CRUD', function () {
             ->assertInertia(fn ($page) => $page
                 ->component('properties/index')
                 ->has('properties.data', 3)
+                ->where('properties.data.2.type_label', 'Villa')
+                ->where('properties.data.2.city.id', $villa->city_id)
+                ->where('properties.data.2.region.id', $villa->region_id)
             );
+    });
+
+    it('applies multiple property type filters', function () {
+        $user = User::factory()->owner()->create();
+        Property::factory()->create(['type' => 'boarding_house']);
+        Property::factory()->create(['type' => 'apartment']);
+        Property::factory()->create(['type' => 'villa']);
+
+        $this->actingAs($user)
+            ->get(route('properties.index', ['type' => 'boarding_house,apartment']))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('properties.data', 2)
+            );
+    });
+
+    it('does not automatically load property relations for light queries', function () {
+        Property::factory()->create();
+
+        DB::connection()->enableQueryLog();
+        DB::connection()->flushQueryLog();
+
+        $property = Property::query()->get(['id', 'name'])->first();
+
+        expect($property)->not->toBeNull()
+            ->and($property->relationLoaded('region'))->toBeFalse()
+            ->and($property->relationLoaded('city'))->toBeFalse()
+            ->and($property->relationLoaded('propertyType'))->toBeFalse()
+            ->and(DB::connection()->getQueryLog())->toHaveCount(1);
+    });
+
+    it('keeps scalar property queries relation-free', function () {
+        Property::factory()->create();
+
+        DB::connection()->enableQueryLog();
+
+        foreach ([
+            fn () => Property::query()->pluck('id'),
+            fn () => Property::query()->count(),
+            fn () => Property::query()->exists(),
+        ] as $query) {
+            DB::connection()->flushQueryLog();
+            $query();
+
+            expect(DB::connection()->getQueryLog())->toHaveCount(1);
+        }
     });
 
     it('creates a property', function () {
@@ -82,6 +135,35 @@ describe('CRUD', function () {
         expect($property->name)->toBe('Kos Melati');
         expect($property->region->name)->toBe('DKI Jakarta');
         expect($property->city->name)->toBe('Kota Jakarta Selatan');
+    });
+
+    it('assigns a created property to a non-owner creator', function () {
+        $user = User::factory()->admin()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.store'), [
+                'name' => 'Kos Melati',
+            ])
+            ->assertRedirect();
+
+        $property = Property::firstOrFail();
+
+        $this->assertDatabaseHas('property_user', [
+            'user_id' => $user->id,
+            'property_id' => $property->id,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('properties.index'))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/index')
+                ->has('properties.data', 1)
+                ->where('properties.data.0.id', $property->id));
+
+        $this->actingAs($user)
+            ->get(route('properties.show', $property))
+            ->assertOk();
     });
 
     it('validates required fields on create', function () {
@@ -137,10 +219,154 @@ describe('type', function () {
             'type' => 'villa',
         ]);
 
-        $property = Property::first();
+        $property = Property::with('propertyType')->first();
 
         expect($property->type)->toBe('villa')
             ->and($property->type_label)->toBe('Villa');
+    });
+
+    it('uses the property type rental model default for new properties', function () {
+        $user = User::factory()->owner()->create();
+
+        $this->actingAs($user)->post(route('properties.store'), [
+            'name' => 'Villa Bali',
+            'type' => 'villa',
+        ]);
+
+        expect(Property::firstOrFail()->rental_mode)->toBe(PropertyRentalMode::WholeProperty);
+    });
+
+    it('allows a new property to override the property type rental model default', function () {
+        $user = User::factory()->owner()->create();
+
+        $this->actingAs($user)->post(route('properties.store'), [
+            'name' => 'Villa Rooms',
+            'type' => 'villa',
+            'rental_mode' => PropertyRentalMode::Unit->value,
+        ]);
+
+        expect(Property::firstOrFail()->rental_mode)->toBe(PropertyRentalMode::Unit);
+    });
+
+    it('exposes rental model capabilities', function () {
+        expect(PropertyRentalMode::Unit->supportsUnitInventory())->toBeTrue()
+            ->and(PropertyRentalMode::Unit->supportsPropertyPricing())->toBeFalse()
+            ->and(PropertyRentalMode::WholeProperty->supportsUnitInventory())->toBeFalse()
+            ->and(PropertyRentalMode::WholeProperty->supportsPropertyPricing())->toBeTrue()
+            ->and(PropertyRentalMode::Hybrid->supportsUnitInventory())->toBeTrue()
+            ->and(PropertyRentalMode::Hybrid->supportsPropertyPricing())->toBeTrue();
+    });
+
+    it('preserves an explicit rental model when the property type changes', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create([
+            'type' => 'boarding_house',
+            'rental_mode' => PropertyRentalMode::WholeProperty,
+        ]);
+
+        $this->actingAs($user)->put(route('properties.update', $property), [
+            'name' => $property->name,
+            'type' => 'villa',
+            'rental_mode' => PropertyRentalMode::WholeProperty->value,
+        ])->assertRedirect();
+
+        expect($property->refresh()->rental_mode)->toBe(PropertyRentalMode::WholeProperty);
+    });
+
+    it('rejects invalid rental models', function () {
+        $user = User::factory()->owner()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.store'), [
+                'name' => 'Invalid Model House',
+                'rental_mode' => 'rooms_only',
+            ])
+            ->assertSessionHasErrors('rental_mode');
+    });
+
+    it('does not allow rental model changes while a property is published', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create([
+            'is_published' => true,
+            'public_slug' => 'published-house',
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.update', $property), [
+                'name' => $property->name,
+                'rental_mode' => PropertyRentalMode::Hybrid->value,
+            ])
+            ->assertRedirect()
+            ->assertSessionHasErrors('rental_mode');
+
+        expect($property->refresh()->rental_mode)->toBe(PropertyRentalMode::Unit);
+    });
+
+    it('does not allow a unit property with active leases to become whole property', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        Lease::factory()->create(['unit_id' => $unit->id]);
+
+        $this->actingAs($user)
+            ->put(route('properties.update', $property), [
+                'name' => $property->name,
+                'rental_mode' => PropertyRentalMode::WholeProperty->value,
+            ])
+            ->assertRedirect()
+            ->assertSessionHasErrors('rental_mode');
+
+        expect($property->refresh()->rental_mode)->toBe(PropertyRentalMode::Unit);
+    });
+
+    it('does not allow a hybrid property with active leases to become whole property', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create([
+            'rental_mode' => PropertyRentalMode::Hybrid,
+        ]);
+        $unit = Unit::factory()->for($property)->create();
+        Lease::factory()->create(['unit_id' => $unit->id]);
+
+        $this->actingAs($user)
+            ->put(route('properties.update', $property), [
+                'name' => $property->name,
+                'rental_mode' => PropertyRentalMode::WholeProperty->value,
+            ])
+            ->assertRedirect()
+            ->assertSessionHasErrors('rental_mode');
+
+        expect($property->refresh()->rental_mode)->toBe(PropertyRentalMode::Hybrid);
+    });
+
+    it('allows unit inventory properties with only historical leases to become whole property', function () {
+        $user = User::factory()->owner()->create();
+
+        foreach ([PropertyRentalMode::Unit, PropertyRentalMode::Hybrid] as $mode) {
+            $property = Property::factory()->create(['rental_mode' => $mode]);
+            $unit = Unit::factory()->for($property)->create();
+            Lease::factory()->terminated()->create(['unit_id' => $unit->id]);
+
+            $this->actingAs($user)
+                ->put(route('properties.update', $property), [
+                    'name' => $property->name,
+                    'rental_mode' => PropertyRentalMode::WholeProperty->value,
+                ])
+                ->assertRedirect()
+                ->assertSessionHasNoErrors();
+
+            expect($property->refresh()->rental_mode)->toBe(PropertyRentalMode::WholeProperty);
+        }
+    });
+
+    it('falls back to the raw type without lazy loading propertyType', function () {
+        $property = Property::factory()->create(['type' => 'villa']);
+
+        DB::connection()->enableQueryLog();
+        DB::connection()->flushQueryLog();
+
+        expect($property->type_label)->toBe('villa')
+            ->and($property->relationLoaded('propertyType'))->toBeFalse()
+            ->and(DB::connection()->getQueryLog())->toHaveCount(0);
     });
 
     it('updates the type', function () {
@@ -192,6 +418,33 @@ describe('cross-property access', function () {
 });
 
 describe('workspace tabs', function () {
+    it('keeps the overview tab read-only', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->get(route('properties.show', $property))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/overview')
+                ->missing('amenities')
+                ->missing('property.gallery'));
+    });
+
+    it('renders the listing tab with listing management data', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->get(route('properties.listing', $property))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/listing')
+                ->where('property.id', $property->id)
+                ->has('property.gallery')
+                ->has('amenities'));
+    });
+
     it('renders the leases tab with workspace stats', function () {
         $user = User::factory()->owner()->create();
         $property = Property::factory()->create();
@@ -202,6 +455,9 @@ describe('workspace tabs', function () {
             ->assertInertia(fn ($page) => $page
                 ->component('properties/leases')
                 ->where('property.id', $property->id)
+                ->where('property.type_label', 'Boarding House')
+                ->where('property.city.id', $property->city_id)
+                ->where('property.region.id', $property->region_id)
                 ->has('property.units_count')
                 ->has('property.occupied_units_count')
                 ->has('property.tenants_count'));
@@ -226,6 +482,10 @@ describe('workspace tabs', function () {
 
         $this->actingAs($user)
             ->get(route('properties.workspace.leases', $property))
+            ->assertForbidden();
+
+        $this->actingAs($user)
+            ->get(route('properties.listing', $property))
             ->assertForbidden();
     });
 });

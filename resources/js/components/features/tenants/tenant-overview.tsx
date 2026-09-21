@@ -1,6 +1,7 @@
 import TenantAppAccessSection from '@/components/features/tenants/tenant-app-access-section';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { formatDate, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import type { Lease, WorkspaceTenant } from '@/types';
 
 export default function TenantOverview({
@@ -14,7 +15,9 @@ export default function TenantOverview({
     return (
         <div className="space-y-6">
             <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">Status:</span>
+                <span className="text-sm text-muted-foreground">
+                    {t('Status:')}
+                </span>
                 {
                     <StatusBadge
                         domain="tenant"
@@ -33,13 +36,16 @@ export default function TenantOverview({
 
             <div className="rounded-lg border bg-muted/30 p-4">
                 <p className="mb-2 text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                    Current Lease
+                    {t('Current Lease')}
                 </p>
                 {activeLease ? (
                     <div className="space-y-2">
                         <div className="flex items-center justify-between">
                             <span className="text-sm font-medium">
-                                {activeLease.unit?.name ?? 'Unknown Unit'}
+                                {activeLease.target_type === 'whole_property'
+                                    ? t('Entire property')
+                                    : (activeLease.unit?.name ??
+                                      t('Unknown Unit'))}
                             </span>
                             <span className="font-mono text-xs text-muted-foreground">
                                 {activeLease.reference}
@@ -47,8 +53,8 @@ export default function TenantOverview({
                         </div>
                         <div className="flex items-center justify-between text-sm">
                             <span className="text-muted-foreground">
-                                {activeLease.unit?.property?.name ??
-                                    'Unknown Property'}
+                                {activeLease.property?.name ??
+                                    t('Unknown Property')}
                             </span>
                         </div>
                         <div className="flex items-center justify-between text-sm">
@@ -56,16 +62,20 @@ export default function TenantOverview({
                                 {formatDate(activeLease.start_date)}
                                 {activeLease.end_date
                                     ? ` — ${formatDate(activeLease.end_date)}`
-                                    : ' — Present'}
+                                    : ` — ${t('Present')}`}
                             </span>
                             <span className="font-medium tabular-nums">
-                                {formatPrice(activeLease.rent_amount)}/mo
+                                {formatPrice(
+                                    activeLease.rent_amount,
+                                    activeLease.currency,
+                                )}
+                                /mo
                             </span>
                         </div>
                     </div>
                 ) : (
                     <p className="text-sm text-muted-foreground">
-                        No active lease
+                        {t('No active lease')}
                     </p>
                 )}
             </div>
@@ -73,13 +83,13 @@ export default function TenantOverview({
             <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        Phone
+                        {t('Phone')}
                     </p>
                     <p className="mt-1 text-sm">{tenant.phone ?? '—'}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        ID Card (KTP)
+                        {t('ID Card (KTP)')}
                     </p>
                     <p className="mt-1 text-sm tabular-nums">
                         {tenant.id_card_number ?? '—'}
@@ -90,7 +100,7 @@ export default function TenantOverview({
             <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        Emergency Contact
+                        {t('Emergency Contact')}
                     </p>
                     <p className="mt-1 text-sm">
                         {tenant.emergency_contact_name ?? '—'}
@@ -98,7 +108,7 @@ export default function TenantOverview({
                 </div>
                 <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        Emergency Phone
+                        {t('Emergency Phone')}
                     </p>
                     <p className="mt-1 text-sm tabular-nums">
                         {tenant.emergency_contact_phone ?? '—'}
@@ -109,7 +119,7 @@ export default function TenantOverview({
             {tenant.notes && (
                 <div>
                     <p className="mb-2 text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                        Notes
+                        {t('Notes')}
                     </p>
                     <p className="rounded-lg border bg-muted/30 p-4 text-sm whitespace-pre-wrap">
                         {tenant.notes}

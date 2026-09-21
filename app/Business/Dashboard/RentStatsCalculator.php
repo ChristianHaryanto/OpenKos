@@ -5,6 +5,7 @@ namespace App\Business\Dashboard;
 use App\Enums\InvoiceStatus;
 use App\Models\Invoice;
 use App\Models\Lease;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 
@@ -28,7 +29,7 @@ class RentStatsCalculator
         $paidSet = array_flip($paidLeaseIds);
 
         $overdueCount = 0;
-        $overdueAmount = 0.0;
+        $overdueAmounts = [];
         $dueTodayCount = 0;
         $dueSoonCount = 0;
         $paidCount = 0;
@@ -44,7 +45,9 @@ class RentStatsCalculator
 
             if ($dueDay < $today) {
                 $overdueCount++;
-                $overdueAmount += (float) $lease->rent_amount;
+                $currency = $lease->currency;
+                $overdueAmounts[$currency] = ($overdueAmounts[$currency] ?? BigDecimal::zero())
+                    ->plus((string) $lease->rent_amount);
             } elseif ($dueDay === $today) {
                 $dueTodayCount++;
             } elseif ($dueDay <= $today + 7) {
@@ -53,7 +56,16 @@ class RentStatsCalculator
         }
 
         return [
-            'overdue' => ['count' => $overdueCount, 'amount' => $overdueAmount],
+            'overdue' => [
+                'count' => $overdueCount,
+                'amounts' => collect($overdueAmounts)
+                    ->map(fn (BigDecimal $amount, string $currency): array => [
+                        'currency' => $currency,
+                        'amount' => $amount->toString(),
+                    ])
+                    ->values()
+                    ->all(),
+            ],
             'due_today' => $dueTodayCount,
             'due_soon' => $dueSoonCount,
             'paid' => $paidCount,
@@ -92,11 +104,13 @@ class RentStatsCalculator
         return [
             'id' => $lease->id,
             'tenant_name' => $tenants->pluck('name')->join(', ') ?: ($primaryTenant?->name ?? '—'),
+            'target_type' => $lease->target_type,
             'unit_name' => $unit?->name ?? '—',
-            'property_name' => $unit?->property?->name ?? '—',
+            'property_name' => $lease->property?->name ?? '—',
             'rent_due_day' => $lease->rent_due_day,
             'days_overdue' => $daysOverdue,
             'rent_amount' => (string) $lease->rent_amount,
+            'currency' => $lease->currency,
             'rent_status' => $status,
         ];
     }

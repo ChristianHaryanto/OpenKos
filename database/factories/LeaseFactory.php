@@ -4,6 +4,8 @@ namespace Database\Factories;
 
 use App\Enums\LeaseStatus;
 use App\Models\Lease;
+use App\Models\Property;
+use App\Models\PropertyRate;
 use App\Models\Tenant;
 use App\Models\Unit;
 use Illuminate\Database\Eloquent\Factories\Factory;
@@ -38,18 +40,39 @@ class LeaseFactory extends Factory
 
     public function configure(): static
     {
-        return $this->afterCreating(function (Lease $lease) {
-            $lease->tenants()->attach($lease->primary_tenant_id, ['is_primary' => true]);
-        });
+        return $this
+            ->afterMaking(function (Lease $lease): void {
+                if ($lease->property_id === null && $lease->unit_id !== null) {
+                    $lease->property_id = Unit::query()->whereKey($lease->unit_id)->value('property_id');
+                }
+            })
+            ->afterCreating(function (Lease $lease): void {
+                $lease->tenants()->attach($lease->primary_tenant_id, ['is_primary' => true]);
+            });
+    }
+
+    public function wholeProperty(?Property $property = null): static
+    {
+        $property ??= Property::factory();
+
+        return $this->state([
+            'property_id' => $property,
+            'property_rate_id' => PropertyRate::factory()->for($property),
+            'unit_id' => null,
+        ]);
     }
 
     public function terminated(): static
     {
-        return $this->state(fn (array $attributes) => [
-            'end_date' => fake()->dateTimeBetween('-1 month', 'now'),
-            'status' => LeaseStatus::Terminated,
-            'termination_date' => fake()->dateTimeBetween('-1 month', 'now'),
-            'termination_reason' => fake()->sentence(),
-        ]);
+        return $this->state(function (array $attributes): array {
+            $endDate = fake()->dateTimeBetween('-1 month', 'now');
+
+            return [
+                'end_date' => $endDate,
+                'status' => LeaseStatus::Terminated,
+                'termination_date' => $endDate,
+                'termination_reason' => fake()->sentence(),
+            ];
+        });
     }
 }

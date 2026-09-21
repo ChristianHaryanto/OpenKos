@@ -2,26 +2,31 @@
 
 namespace App\Business\Leases;
 
-use App\Models\Lease;
+use Brick\Math\BigDecimal;
 
 class LeaseFinancialChecker
 {
     /**
-     * @return int Total outstanding amount in cents.
+     * @param  iterable<int, string>  $outstandingAmounts
      */
-    public function outstandingBalance(Lease $lease): int
+    public function outstandingBalance(iterable $outstandingAmounts): string
     {
-        return (int) $lease->invoices()->overdue()->get()->sum(
-            fn ($invoice) => (int) round((float) $invoice->outstanding * 100)
-        );
+        $total = BigDecimal::zero();
+
+        foreach ($outstandingAmounts as $amount) {
+            $total = $total->plus($amount);
+        }
+
+        return $total->toString();
     }
 
     /**
-     * @return array{balance: int, hasOutstanding: bool}
+     * @param  iterable<int, string>  $outstandingAmounts
+     * @return array{balance: string, hasOutstanding: bool}
      */
-    public function outstandingCheck(Lease $lease): array
+    public function outstandingCheck(iterable $outstandingAmounts): array
     {
-        $balance = $this->outstandingBalance($lease);
+        $balance = $this->outstandingBalance($outstandingAmounts);
 
         return [
             'balance' => $balance,

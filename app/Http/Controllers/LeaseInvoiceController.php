@@ -9,7 +9,9 @@ use App\Models\Lease;
 use App\Models\PaymentAttempt;
 use App\Models\Setting;
 use App\Services\Invoices\InvoicePdfArtifact;
+use App\Services\Localization\ApplicationLocale;
 use App\Services\Payments\SignedInvoicePaymentLink;
+use App\Support\DateTimeFormatter;
 use App\Tables\Column;
 use App\Tables\Filter;
 use App\Tables\Table;
@@ -70,8 +72,8 @@ class LeaseInvoiceController extends Controller
 
         $this->authorize('view', $lease);
 
-        $invoice->loadMissing('lease.unit');
-        $invoice->load(['lineItems', 'payments.confirmedBy:id,name', 'payments.proofs']);
+        $invoice->loadMissing(['lease.property', 'lease.unit']);
+        $invoice->load(['lineItems', 'payments.confirmedBy:id,name', 'payments.proofs.media']);
         $gatewayAttempts = $invoice->paymentAttempts()
             ->latest('id')
             ->get([
@@ -97,10 +99,10 @@ class LeaseInvoiceController extends Controller
                 'amount' => $attempt->amount,
                 'currency' => $attempt->currency,
                 'status' => $attempt->status->value,
-                'expires_at' => $attempt->expires_at,
-                'initiated_at' => $attempt->initiated_at,
-                'created_at' => $attempt->created_at,
-                'updated_at' => $attempt->updated_at,
+                'expires_at' => DateTimeFormatter::nullableIso($attempt->expires_at),
+                'initiated_at' => DateTimeFormatter::iso($attempt->initiated_at),
+                'created_at' => DateTimeFormatter::iso($attempt->created_at),
+                'updated_at' => DateTimeFormatter::iso($attempt->updated_at),
                 'failure_code' => $this->failureCode($attempt),
                 'failure_message' => $this->failureMessage($attempt),
                 'recheckable' => $attempt->status === GatewayPaymentStatus::Pending
@@ -147,7 +149,7 @@ class LeaseInvoiceController extends Controller
         };
     }
 
-    public function print(Lease $lease, Invoice $invoice): ViewContract
+    public function print(Lease $lease, Invoice $invoice, ApplicationLocale $locale): ViewContract
     {
         abort_if($invoice->lease_id !== $lease->id, 404);
 
@@ -155,8 +157,9 @@ class LeaseInvoiceController extends Controller
 
         $invoice->load([
             'lease.primaryTenant.user',
-            'lease.unit.property.city',
-            'lease.unit.property.region',
+            'lease.property.city',
+            'lease.property.region',
+            'lease.unit',
             'lineItems',
             'payments' => fn ($query) => $query
                 ->where('status', PaymentStatus::Confirmed)
@@ -165,12 +168,13 @@ class LeaseInvoiceController extends Controller
         ]);
         $invoice->append(['outstanding', 'display_status']);
         $settings = Setting::some(['site_name', 'locale', 'currency']);
+        $resolvedLocale = $locale->resolve($settings['locale'] ?? null);
 
         return view('invoices.pdf', [
             'autoPrint' => true,
-            'currency' => $settings['currency'] ?? 'IDR',
+            'currency' => $invoice->currency,
             'invoice' => $invoice,
-            'locale' => $settings['locale'] ?? 'id',
+            'locale' => $resolvedLocale,
             'siteName' => $settings['site_name'] ?? config('app.name'),
         ]);
     }

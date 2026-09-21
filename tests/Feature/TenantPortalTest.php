@@ -6,6 +6,7 @@ use App\Enums\PaymentStatus;
 use App\Models\Invoice;
 use App\Models\Lease;
 use App\Models\LeaseUnitHistory;
+use App\Models\Media;
 use App\Models\Payment;
 use App\Models\PaymentAttempt;
 use App\Models\Tenant;
@@ -26,11 +27,12 @@ uses()->beforeEach(function () {
     $this->seed(RoleAndPermissionSeeder::class);
 });
 
-function bindTenantPortalGateway(?PaymentGateway $gateway): void
+function bindTenantPortalGateway(?PaymentGateway $gateway, ?bool $currencySupport = null): void
 {
     $manager = Mockery::mock(PaymentGatewayManager::class);
     $manager->shouldReceive('activeKey')->andReturn($gateway ? 'test-gateway' : null);
     $manager->shouldReceive('active')->andReturn($gateway);
+    $manager->shouldReceive('supportsCurrency')->zeroOrMoreTimes()->andReturn($currencySupport);
 
     app()->instance(PaymentGatewayManager::class, $manager);
 }
@@ -60,7 +62,10 @@ test('tenant sees a payment-required dashboard action', function () {
             ->where('nextAction.type', 'payment_required')
             ->where('nextAction.invoice.id', $invoice->id)
             ->where('nextAction.invoice.amount', '1500000')
-            ->where('accountSummary.outstanding_balance', '1500000')
+            ->where('accountSummary.outstanding_amounts', [[
+                'currency' => 'IDR',
+                'amount' => '1500000.000',
+            ]])
             ->where('accountSummary.payable_invoice_count', 1)
             ->where('accountSummary.pending_verification_count', 0)
             ->has('recentActivity', 2)
@@ -88,7 +93,7 @@ test('tenant sees payment verification when no invoice needs another payment', f
         ->assertOk()
         ->assertInertia(fn ($page) => $page
             ->where('nextAction.type', 'payment_verification')
-            ->where('nextAction.pending_payment.amount', '1500000.00')
+            ->where('nextAction.pending_payment.amount', '1500000.000')
             ->where('accountSummary.pending_verification_count', 1));
 });
 
@@ -124,7 +129,7 @@ test('tenant sees payment required with verification as supporting context', fun
         ->assertInertia(fn ($page) => $page
             ->where('nextAction.type', 'payment_required')
             ->where('nextAction.invoice.id', $actionableInvoice->id)
-            ->where('nextAction.pending_payment.amount', '1500000.00'));
+            ->where('nextAction.pending_payment.amount', '1500000.000'));
 });
 
 test('tenant sees no payment required without a payable invoice', function () {
@@ -264,9 +269,12 @@ test('tenant sees only their invoices in billing', function () {
             ->component('tenant-portal/payments/index')
             ->has('actionableInvoices.data', 1)
             ->where('actionableInvoices.data.0.id', $invoice->id)
-            ->where('actionableInvoices.data.0.outstanding', '1000000.00')
-            ->where('actionableInvoices.data.0.payable_amount', '500000.00')
-            ->where('outstandingSummary.amount', '500000.00')
+            ->where('actionableInvoices.data.0.outstanding', '1000000.000')
+            ->where('actionableInvoices.data.0.payable_amount', '500000.000')
+            ->where('outstandingSummary.amounts', [[
+                'currency' => 'IDR',
+                'amount' => '500000.000',
+            ]])
             ->where('outstandingSummary.count', 1)
             ->where('outstandingSummary.next_due_date', $invoice->due_date->toDateString())
             ->where('outstandingSummary.pending_payment_count', 1)
@@ -313,7 +321,7 @@ test('tenant can start an online invoice payment without changing invoice accoun
         ->post(route('portal.billing.invoices.pay', $invoice))
         ->assertRedirect('https://example.test/checkout');
 
-    expect($invoice->fresh()->amount_paid)->toBe('0.00')
+    expect($invoice->fresh()->amount_paid)->toBe('0.000')
         ->and($invoice->fresh()->status)->toBe(InvoiceStatus::Pending)
         ->and($invoice->paymentAttempts()->sole()->status)->toBe(GatewayPaymentStatus::Pending);
 });
@@ -397,7 +405,7 @@ test('tenant invoice payment status does not come from browser query parameters'
         ->assertOk()
         ->assertInertia(fn ($page) => $page
             ->where('invoice.status', InvoiceStatus::Pending->value)
-            ->where('invoice.amount_paid', '0.00')
+            ->where('invoice.amount_paid', '0.000')
             ->where('gatewayAttempts.0.status', 'pending'));
 });
 
@@ -463,6 +471,33 @@ test('tenant sees online payment unavailable without a gateway or resumable atte
             'type' => 'error',
             'message' => 'Online payment is not available for this invoice.',
         ]);
+});
+
+test('tenant sees online payment unavailable when the gateway rejects the invoice currency', function () {
+    $user = User::factory()->create();
+    $tenant = Tenant::factory()->withUser($user)->create();
+    $lease = Lease::factory()->create(['primary_tenant_id' => $tenant->id]);
+    $invoice = Invoice::factory()->create([
+        'lease_id' => $lease->id,
+        'currency' => 'USD',
+        'status' => InvoiceStatus::Pending,
+    ]);
+    bindTenantPortalGateway(Mockery::mock(PaymentGateway::class), currencySupport: false);
+
+    $this->actingAs($user)
+        ->get(route('portal.billing.invoices.show', $invoice))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->where('onlinePaymentAvailable', false)
+            ->where('onlinePaymentUnavailableReason', 'Test Gateway is not available for USD payments.'));
+
+    $this->post(route('portal.billing.invoices.pay', $invoice))
+        ->assertInertiaFlash('toast', [
+            'type' => 'error',
+            'message' => 'Test Gateway is not available for USD payments.',
+        ]);
+
+    expect($invoice->paymentAttempts()->count())->toBe(0);
 });
 
 test('tenant sees only their billing data', function () {
@@ -557,7 +592,7 @@ test('tenant can pay the remaining balance after a partial pending payment', fun
         ->assertInertia(fn ($page) => $page
             ->has('actionableInvoices.data', 1)
             ->where('actionableInvoices.data.0.id', $invoice->id)
-            ->where('actionableInvoices.data.0.payable_amount', '1000000.00')
+            ->where('actionableInvoices.data.0.payable_amount', '1000000.000')
             ->has('pendingPayments', 1));
 });
 
@@ -664,14 +699,18 @@ test('tenant submits a pending invoice payment for verification', function () {
 
     $payment = $invoice->payments()->sole();
 
+    $proof = $payment->proofs->sole();
+
     expect($payment->status)->toBe(PaymentStatus::Pending)
         ->and($payment->recorded_by)->toBe($tenantUser->id)
         ->and($payment->confirmed_by)->toBeNull()
         ->and($payment->proofs)->toHaveCount(1)
-        ->and($invoice->fresh()->amount_paid)->toBe('0.00')
+        ->and($proof->media_id)->not->toBeNull()
+        ->and($proof->media->is(Media::query()->find($proof->media_id)))->toBeTrue()
+        ->and($invoice->fresh()->amount_paid)->toBe('0.000')
         ->and($invoice->fresh()->status)->toBe(InvoiceStatus::Pending);
 
-    Storage::disk('local')->assertExists($payment->proofs->sole()->path);
+    Storage::disk($proof->media->disk)->assertExists($proof->media->path);
 
     $this->actingAs($tenantUser)
         ->post(route('portal.billing.store'), [
@@ -692,7 +731,7 @@ test('tenant submits a pending invoice payment for verification', function () {
         ->post(route('payments.verify', $payment), ['action' => 'confirm']);
 
     expect($payment->fresh()->status)->toBe(PaymentStatus::Confirmed)
-        ->and($invoice->fresh()->amount_paid)->toBe('1500000.00')
+        ->and($invoice->fresh()->amount_paid)->toBe('1500000.000')
         ->and($invoice->fresh()->status)->toBe(InvoiceStatus::Paid);
 });
 

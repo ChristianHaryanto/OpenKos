@@ -11,6 +11,9 @@ use App\Notifications\Channels\LogChannel;
 use App\Notifications\Channels\MailChannel;
 use App\Notifications\Channels\WhatsAppChannel;
 use App\Services\Invoices\InvoicePdfArtifact;
+use App\Services\Localization\ApplicationLocale;
+use App\Services\Payments\MoneyConverter;
+use App\Services\Payments\SignedInvoicePaymentLink;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -124,7 +127,7 @@ class RentReminder extends Notification implements MailChannelNotification, Shou
         }
 
         return new WhatsAppContent(
-            message: $this->renderMessage($notifiable),
+            message: $this->renderMessage($notifiable, useSignedInvoiceLink: true),
             attachment: $attachment,
         );
     }
@@ -156,16 +159,24 @@ class RentReminder extends Notification implements MailChannelNotification, Shou
 
     public function toWhatsApp(object $notifiable): string
     {
-        return $this->renderMessage($notifiable);
+        return $this->renderMessage($notifiable, useSignedInvoiceLink: true);
     }
 
-    private function renderMessage(object $notifiable): string
+    private function renderMessage(object $notifiable, bool $useSignedInvoiceLink = false): string
     {
+        $locale = app(ApplicationLocale::class);
+        $locale->apply($this->locale ?? null);
+
         $days = $this->event->overdueDays
             ?? (int) now()->startOfDay()->diffInDays(Carbon::parse($this->event->dueDate), false);
 
-        $amount = number_format($this->event->amount / 100, 0);
-        $date = Carbon::parse($this->event->dueDate)->format('d M Y');
+        $currency = app(MoneyConverter::class)->normalizeCurrency($this->event->currency);
+        $amount = app(MoneyConverter::class)->format(
+            $this->event->amount,
+            $currency,
+            $locale->current(),
+        );
+        $date = Carbon::parse($this->event->dueDate)->locale($locale->current())->translatedFormat('d M Y');
 
         $templates = Setting::get('reminder_message_templates');
         $template = is_array($templates)
@@ -177,26 +188,29 @@ class RentReminder extends Notification implements MailChannelNotification, Shou
         $invoiceContext = $invoice
             ? __('notifications.rent.invoice_context', [
                 'reference' => $invoice->reference,
-                'period' => Carbon::parse($this->event->periodStart)->format('d M Y')
-                    .' – '.Carbon::parse($this->event->periodEnd)->format('d M Y'),
+                'period' => Carbon::parse($this->event->periodStart)->locale($locale->current())->translatedFormat('d M Y')
+                    .' – '.Carbon::parse($this->event->periodEnd)->locale($locale->current())->translatedFormat('d M Y'),
                 'date' => $date,
                 'amount' => $amount,
             ])
             : '';
-        $invoiceUrl = $this->invoiceUrl($notifiable);
+        $invoiceUrl = $this->invoiceUrl($notifiable, $useSignedInvoiceLink);
         $invoiceLink = $invoiceUrl
             ? __('notifications.rent.view_invoice').': '.$invoiceUrl
             : '';
+        $target = $this->event->lease->unit?->name
+            ?? $this->event->lease->property?->name
+            ?? __('Entire property');
 
         $message = $template
             ? str_replace(
                 [':name', ':unit', ':days', ':amount', ':date', ':invoice_context', ':invoice_link'],
-                [$notifiable->name, $this->event->lease->unit?->name ?? '—', $days, $amount, $date, $invoiceContext, $invoiceLink],
+                [$notifiable->name, $target, $days, $amount, $date, $invoiceContext, $invoiceLink],
                 $template,
             )
             : __("notifications.rent.{$this->event->type->value}", [
                 'name' => $notifiable->name,
-                'unit' => $this->event->lease->unit?->name ?? '—',
+                'unit' => $target,
                 'days' => $days,
                 'amount' => $amount,
                 'date' => $date,
@@ -212,9 +226,16 @@ class RentReminder extends Notification implements MailChannelNotification, Shou
         return isset($this->event->invoice) ? $this->event->invoice : null;
     }
 
-    private function invoiceUrl(object $notifiable): ?string
+    private function invoiceUrl(object $notifiable, bool $useSignedInvoiceLink = false): ?string
     {
-        return $this->portalUrl($notifiable, $this->invoice());
+        $invoice = $this->invoice();
+        $portalUrl = $this->portalUrl($notifiable, $invoice);
+
+        if ($portalUrl || ! $useSignedInvoiceLink || ! $invoice || ! ($notifiable instanceof Tenant)) {
+            return $portalUrl;
+        }
+
+        return app(SignedInvoicePaymentLink::class)->url($invoice);
     }
 
     private function portalUrl(object $notifiable, ?Invoice $invoice = null): ?string

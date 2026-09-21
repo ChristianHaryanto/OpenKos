@@ -15,6 +15,8 @@ import { useState } from 'react';
 import {
     ActivityFeedItem,
     BusinessHealthPanel,
+    CurrencyAmountList,
+    ExpensesSummaryPanel,
     getActivitySummaryChips,
     OperationalBriefingCard,
     PropertyFormSheet,
@@ -30,8 +32,11 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { formatRupiah } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import { dashboard } from '@/routes';
+import dashboardRoutes from '@/routes/dashboard';
+import propertyRoutes from '@/routes/properties';
+import tenants from '@/routes/tenants';
 import type {
     AttentionData,
     Finance,
@@ -49,6 +54,7 @@ export default function Overview({
     recent_activity,
     properties,
     units,
+    transferUnits,
 }: {
     attention: AttentionData;
     finance: Finance;
@@ -56,6 +62,7 @@ export default function Overview({
     recent_activity: RecentActivityEntry[];
     properties: MaintenanceProperty[];
     units: MaintenanceUnit[];
+    transferUnits: MaintenanceUnit[];
 }) {
     const [tenantSheetOpen, setTenantSheetOpen] = useState(false);
     const [propertySheetOpen, setPropertySheetOpen] = useState(false);
@@ -65,16 +72,18 @@ export default function Overview({
 
     return (
         <>
-            <Head title="Dashboard" />
+            <Head title={t('Dashboard')} />
             <div className="flex h-full flex-1 flex-col overflow-x-auto p-4 md:p-6 lg:p-8">
                 {/* 1. Page Header with Aligned Quick Actions */}
                 <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                         <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
-                            Dashboard
+                            {t('Dashboard')}
                         </h1>
                         <p className="mt-1 text-xs text-muted-foreground sm:text-sm">
-                            Monitor billing, occupancy, and property operations.
+                            {t(
+                                'Monitor billing, occupancy, and property operations.',
+                            )}
                         </p>
                     </div>
 
@@ -86,7 +95,7 @@ export default function Overview({
                             className="cursor-pointer gap-2 shadow-xs"
                         >
                             <UserPlus className="size-4" />
-                            Add Tenant
+                            {t('Add Tenant')}
                         </Button>
                         <Button
                             variant="outline"
@@ -94,9 +103,9 @@ export default function Overview({
                             asChild
                             className="gap-2 bg-card shadow-xs"
                         >
-                            <Link href="/dashboard/rent">
+                            <Link href={dashboardRoutes.rent.url()}>
                                 <Banknote className="size-4 text-muted-foreground" />
-                                Collect Rent
+                                {t('Collect Rent')}
                             </Link>
                         </Button>
                         <DropdownMenu>
@@ -106,7 +115,7 @@ export default function Overview({
                                     size="sm"
                                     className="cursor-pointer gap-1.5 bg-card shadow-xs"
                                 >
-                                    More
+                                    {t('More')}
                                     <ChevronDown className="size-3.5 text-muted-foreground" />
                                 </Button>
                             </DropdownMenuTrigger>
@@ -115,18 +124,18 @@ export default function Overview({
                                     onClick={() => setTicketSheetOpen(true)}
                                 >
                                     <Wrench className="mr-2 size-4 text-muted-foreground" />
-                                    Report Maintenance
+                                    {t('Report Maintenance')}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
                                     onClick={() => setPropertySheetOpen(true)}
                                 >
                                     <Building2 className="mr-2 size-4 text-muted-foreground" />
-                                    Add Property
+                                    {t('Add Property')}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem asChild>
-                                    <Link href="/tenants">
+                                    <Link href={tenants.index.url()}>
                                         <UserCheck className="mr-2 size-4 text-muted-foreground" />
-                                        Assign Tenant
+                                        {t('Assign Tenant')}
                                     </Link>
                                 </DropdownMenuItem>
                             </DropdownMenuContent>
@@ -140,46 +149,52 @@ export default function Overview({
                 {/* 3. Today's Attention Metrics */}
                 <section className="mb-10 flex flex-col gap-3">
                     <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-                        Today&apos;s Attention
+                        {t("Today's Attention")}
                     </h2>
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                         <MetricCard
-                            label="Overdue Invoices"
+                            label={t('Overdue Invoices')}
                             value={attention.overdue_invoices.count}
                             subtext={
-                                attention.overdue_invoices.amount > 0
-                                    ? formatRupiah(
-                                          attention.overdue_invoices.amount,
-                                      )
-                                    : undefined
+                                attention.overdue_invoices.amounts.length >
+                                0 ? (
+                                    <CurrencyAmountList
+                                        groups={
+                                            attention.overdue_invoices.amounts
+                                        }
+                                        compact
+                                        amountClassName="text-surface-red-foreground"
+                                    />
+                                ) : undefined
                             }
                             variant="red"
                             emphasis="attention"
                             icon={AlertTriangle}
+                            subtextFullWidth
                         />
                         <MetricCard
-                            label="Due Today"
+                            label={t('Due Today')}
                             value={attention.due_today}
                             variant="amber"
                             emphasis="subtle"
                             icon={CalendarClock}
                         />
                         <MetricCard
-                            label="Open Maintenance"
+                            label={t('Open Maintenance')}
                             value={attention.open_maintenance}
                             variant="amber"
                             emphasis="subtle"
                             icon={Wrench}
                         />
                         <MetricCard
-                            label="Leases Ending Soon"
+                            label={t('Leases Ending Soon')}
                             value={attention.leases_ending_soon}
                             variant="blue"
                             emphasis="subtle"
                             icon={FileText}
                         />
                         <MetricCard
-                            label="Pending Review"
+                            label={t('Pending Review')}
                             value={attention.pending_payment_verification}
                             variant="purple"
                             emphasis="subtle"
@@ -188,28 +203,30 @@ export default function Overview({
                     </div>
                 </section>
 
-                {/* 4. Business Health Neutral Panel */}
+                {/* 4. Revenue & Collections Panel */}
                 <BusinessHealthPanel finance={finance} />
 
-                {/* 5. Lower Dashboard: Operational Workspace (Two-Column Layout) */}
-                <div className="grid gap-8 lg:grid-cols-12">
+                <ExpensesSummaryPanel expenses={finance.expenses} />
+
+                {/* 6. Lower Dashboard: Operational Workspace (Two-Column Layout) */}
+                <div className="grid min-w-0 gap-8 lg:grid-cols-12">
                     {/* Left Column: Property Overview (~65% / lg:col-span-7) */}
-                    <section className="flex flex-col gap-3 lg:col-span-7">
+                    <section className="flex min-w-0 flex-col gap-3 lg:col-span-7">
                         <div className="flex items-center justify-between">
                             <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-                                Property Overview
+                                {t('Property Overview')}
                             </h2>
                             {stats.properties.length > 0 && (
                                 <Link
-                                    href="/properties"
+                                    href={propertyRoutes.index.url()}
                                     className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-colors hover:underline"
                                 >
-                                    View All Properties (
+                                    {t('View All Properties')} (
                                     {stats.properties.length}) →
                                 </Link>
                             )}
                         </div>
-                        <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="grid min-w-0 gap-4 sm:grid-cols-2">
                             {stats.properties
                                 .slice(0, 6)
                                 .map((property: PropertyStats) => (
@@ -222,13 +239,13 @@ export default function Overview({
                     </section>
 
                     {/* Right Column: Recent Activity Timeline (~35% / lg:col-span-5) */}
-                    <section className="flex flex-col gap-3 lg:col-span-5">
+                    <section className="flex min-w-0 flex-col gap-3 lg:col-span-5">
                         <div className="flex items-center justify-between">
                             <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-                                Recent Activity
+                                {t('Recent Activity')}
                             </h2>
                             <span className="text-xs font-medium text-muted-foreground tabular-nums">
-                                {recent_activity.length} events
+                                {recent_activity.length} {t('events')}
                             </span>
                         </div>
 
@@ -262,7 +279,7 @@ export default function Overview({
                                 </div>
                             ) : (
                                 <p className="py-4 text-center text-xs text-muted-foreground">
-                                    No recent activity recorded.
+                                    {t('No recent activity recorded.')}
                                 </p>
                             )}
                         </div>
@@ -283,6 +300,7 @@ export default function Overview({
                 onOpenChange={setTicketSheetOpen}
                 properties={properties}
                 units={units}
+                transferUnits={transferUnits}
             />
         </>
     );

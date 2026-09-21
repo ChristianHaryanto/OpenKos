@@ -17,6 +17,7 @@ import { useState } from 'react';
 import { DataTable } from '@/components/data-table';
 import type { TableColumn } from '@/components/data-table';
 import { SearchInput } from '@/components/data-table/search-input';
+import { CurrencyAmountList } from '@/components/features/dashboard/currency-amount-list';
 import InvoiceDetailSheet from '@/components/features/payments/invoice-detail-sheet';
 import QueuePaymentSheet from '@/components/features/payments/queue-payment-sheet';
 import { MetricCard } from '@/components/shared/metric-card';
@@ -34,13 +35,15 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useTable } from '@/hooks/use-table';
 import { PAYMENT_METHOD_LABELS } from '@/lib/constants/billing';
-import { formatDate, formatPrice, formatRupiah } from '@/lib/formatters';
+import { formatDate, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import { rent as dashboardRent } from '@/routes/dashboard';
 import type {
     NeedsAttentionInvoice,
     PaginatedData,
     RecentPaymentEntry,
     RecentReminderEntry,
+    MoneyAggregate,
 } from '@/types';
 
 type TabCounts = {
@@ -56,7 +59,7 @@ type TabCounts = {
 type Progress = {
     processed: number;
     total: number;
-    amount_collected: number;
+    amount_collected: MoneyAggregate[];
     last_payment_at: string | null;
 };
 
@@ -67,7 +70,7 @@ type PageProps = {
     urgency?: string;
     properties?: string;
     per_page?: number;
-    outstanding: { count: number; amount: number };
+    outstanding: { count: number; amounts: MoneyAggregate[] };
     tab_counts: TabCounts;
     progress: Progress;
     recent_payments: RecentPaymentEntry[];
@@ -97,14 +100,14 @@ function urgencyLabel(
 ): { text: string; color: string } {
     if (status === 'paid') {
         return {
-            text: 'Paid',
+            text: t('Paid'),
             color: 'text-surface-green-foreground font-medium',
         };
     }
 
     if (status === 'partial') {
         return {
-            text: 'Partial',
+            text: t('Partial'),
             color: 'text-surface-blue-foreground font-medium',
         };
     }
@@ -116,56 +119,42 @@ function urgencyLabel(
                 : 'text-surface-amber-foreground font-medium';
 
         return {
-            text: `Overdue \u00B7 ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''}`,
+            text: `${t('Overdue')} \u00B7 ${daysOverdue} ${t(daysOverdue === 1 ? 'day' : 'days')}`,
             color,
         };
     }
 
     if (urgency === 'due_today') {
         return {
-            text: 'Due today',
+            text: t('Due today'),
             color: 'text-surface-amber-foreground font-medium',
         };
     }
 
     if (urgency === 'due_tomorrow') {
         return {
-            text: 'Due tomorrow',
+            text: t('Due tomorrow'),
             color: 'text-surface-amber-foreground font-medium',
         };
     }
 
-    return { text: 'Upcoming', color: 'text-muted-foreground' };
+    return { text: t('Upcoming'), color: 'text-muted-foreground' };
 }
 
 function pendingReviewLabel(count: number | undefined): string {
     if (!count || count < 1) {
-        return 'Pending review';
+        return t('Pending review');
     }
 
-    return `Pending review · ${count}`;
+    return `${t('Pending review')} · ${count}`;
 }
 
-function timeAgo(dateStr: string | null): string | null {
-    if (!dateStr) {
-        return null;
-    }
-
-    const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-
-    if (diff < 60) {
-        return 'just now';
-    }
-
-    if (diff < 3600) {
-        return `${Math.floor(diff / 60)}m ago`;
-    }
-
-    if (diff < 86400) {
-        return `${Math.floor(diff / 3600)}h ago`;
-    }
-
-    return `${Math.floor(diff / 86400)}d ago`;
+function formatMoneyGroups(groups: MoneyAggregate[]): string {
+    return (
+        groups
+            .map((group) => formatPrice(group.amount, group.currency))
+            .join(' · ') || '—'
+    );
 }
 
 export default function CollectionQueue({
@@ -283,7 +272,7 @@ export default function CollectionQueue({
         },
         {
             key: 'lease_reference',
-            label: 'Lease',
+            label: t('Lease'),
             className: 'text-xs',
             render: (entry) =>
                 entry.lease_reference ? (
@@ -306,7 +295,7 @@ export default function CollectionQueue({
         },
         {
             key: 'tenant_name',
-            label: 'Tenant',
+            label: t('Tenant'),
             className: 'font-medium',
             render: (entry) =>
                 entry.primary_tenant_id !== null ? (
@@ -323,7 +312,7 @@ export default function CollectionQueue({
         },
         {
             key: 'urgency',
-            label: 'Status',
+            label: t('Status'),
             render: (entry) => {
                 if (currentUrgency === 'pending_review') {
                     return (
@@ -346,21 +335,21 @@ export default function CollectionQueue({
         },
         {
             key: 'total',
-            label: 'Amount',
+            label: t('Amount'),
             sortable: true,
             className: 'tabular-nums font-medium',
-            render: (entry) => formatPrice(entry.total),
+            render: (entry) => formatPrice(entry.total, entry.currency),
         },
         {
             key: 'outstanding',
-            label: 'Outstanding',
+            label: t('Outstanding'),
             className:
                 'tabular-nums text-muted-foreground hidden sm:table-cell',
-            render: (entry) => formatPrice(entry.outstanding),
+            render: (entry) => formatPrice(entry.outstanding, entry.currency),
         },
         {
             key: 'due_date',
-            label: 'Due',
+            label: t('Due'),
             sortable: true,
             className: 'tabular-nums text-muted-foreground',
             render: (entry) => formatDate(entry.due_date),
@@ -388,20 +377,20 @@ export default function CollectionQueue({
                                     onClick={() => openPaymentSheet(entry)}
                                 >
                                     <Banknote className="mr-2 size-4" />
-                                    Record Payment
+                                    {t('Record Payment')}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem asChild>
                                     <Link
                                         href={`/leases/${entry.lease_id}/invoices/${entry.id}`}
                                     >
                                         <ArrowUpRight className="mr-2 size-4" />
-                                        View Invoice
+                                        {t('View Invoice')}
                                     </Link>
                                 </DropdownMenuItem>
                                 <DropdownMenuItem asChild>
                                     <Link href={`/leases/${entry.lease_id}`}>
                                         <Bell className="mr-2 size-4" />
-                                        View Lease
+                                        {t('View Lease')}
                                     </Link>
                                 </DropdownMenuItem>
                             </DropdownMenuContent>
@@ -420,43 +409,43 @@ export default function CollectionQueue({
         progress.total > 0
             ? Math.round((progress.processed / progress.total) * 100)
             : 0;
-    const lastPaymentAgo = timeAgo(progress.last_payment_at);
+    const lastPaymentDate = formatDate(progress.last_payment_at);
 
     return (
         <>
-            <Head title="Collection Queue" />
+            <Head title={t('Collection Queue')} />
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto p-4">
                 {/* Header cards */}
                 <div className="flex items-center justify-between">
                     <h1 className="text-lg font-semibold tracking-tight">
-                        Collection Queue
+                        {t('Collection Queue')}
                     </h1>
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <MetricCard
-                        label="Overdue"
+                        label={t('Overdue')}
                         value={tabCounts.overdue}
                         variant="red"
                         emphasis="attention"
                         icon={AlertTriangle}
                     />
                     <MetricCard
-                        label="Due Today"
+                        label={t('Due Today')}
                         value={tabCounts.due_today}
                         variant="amber"
                         emphasis="subtle"
                         icon={CalendarClock}
                     />
                     <MetricCard
-                        label="Upcoming"
+                        label={t('Upcoming')}
                         value={tabCounts.upcoming}
                         variant="blue"
                         emphasis="subtle"
                         icon={Bell}
                     />
                     <MetricCard
-                        label="Pending Review"
+                        label={t('Pending Review')}
                         value={tabCounts.pending_review}
                         variant="purple"
                         emphasis="subtle"
@@ -465,16 +454,25 @@ export default function CollectionQueue({
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <MetricCard
-                        label="Outstanding Balance"
-                        value={formatRupiah(outstanding.amount)}
-                        subtext={`${outstanding.count} invoice${outstanding.count !== 1 ? 's' : ''} unpaid`}
+                        label={t('Outstanding Balance')}
+                        value={outstanding.count}
+                        subtext={
+                            outstanding.amounts.length > 0 ? (
+                                <CurrencyAmountList
+                                    groups={outstanding.amounts}
+                                    compact
+                                    amountClassName="text-surface-amber-foreground"
+                                />
+                            ) : undefined
+                        }
                         variant="amber"
                         emphasis="subtle"
                         icon={Banknote}
+                        subtextFullWidth
                     />
                     <MetricCard
-                        label="Last Payment Recorded"
-                        value={lastPaymentAgo ?? '—'}
+                        label={t('Last Payment Recorded')}
+                        value={lastPaymentDate}
                         variant="neutral"
                         icon={Clock}
                     />
@@ -489,12 +487,12 @@ export default function CollectionQueue({
                                     <TrendingUp className="size-3.5" />
                                 </div>
                                 <span className="font-semibold text-foreground">
-                                    Collection Progress
+                                    {t('Collection Progress')}
                                 </span>
                             </div>
                             <span className="text-xs font-medium text-muted-foreground tabular-nums">
                                 {progress.processed} / {progress.total}{' '}
-                                processed
+                                {t('processed')}
                             </span>
                         </div>
                         <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -505,8 +503,8 @@ export default function CollectionQueue({
                         </div>
                         <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
                             <span className="font-medium tabular-nums">
-                                {formatRupiah(progress.amount_collected)}{' '}
-                                collected
+                                {formatMoneyGroups(progress.amount_collected)}{' '}
+                                {t('collected')}
                             </span>
                             <span className="font-bold text-foreground tabular-nums">
                                 {progressPercent}%
@@ -520,26 +518,26 @@ export default function CollectionQueue({
                     {selectedCount > 0 ? (
                         <>
                             <span className="font-medium tabular-nums">
-                                {selectedCount} selected
+                                {selectedCount} {t('selected')}
                             </span>
                             <Button size="sm" variant="outline" disabled>
                                 <Banknote className="mr-2 size-4" />
-                                Record Payment
+                                {t('Record Payment')}
                             </Button>
                             <Button size="sm" variant="outline" disabled>
                                 <Bell className="mr-2 size-4" />
-                                Send Reminder
+                                {t('Send Reminder')}
                             </Button>
                             <Button size="sm" variant="outline" disabled>
                                 <Download className="mr-2 size-4" />
-                                Export
+                                {t('Export')}
                             </Button>
                             <button
                                 type="button"
                                 onClick={clearSelection}
                                 className="ml-auto text-muted-foreground hover:text-foreground"
                             >
-                                Clear selection
+                                {t('Clear selection')}
                             </button>
                         </>
                     ) : (
@@ -550,10 +548,10 @@ export default function CollectionQueue({
                                 className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
                             >
                                 <Square className="size-4" />
-                                Select all
+                                {t('Select all')}
                             </button>
                             <span className="text-muted-foreground">
-                                to enable bulk actions.
+                                {t('to enable bulk actions.')}
                             </span>
                         </div>
                     )}
@@ -583,7 +581,7 @@ export default function CollectionQueue({
                                         : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                                 }`}
                             >
-                                {tab.label}
+                                {t(tab.label)}
                                 <span
                                     className={`inline-flex size-5 items-center justify-center rounded-full text-xs ${
                                         active
@@ -604,7 +602,9 @@ export default function CollectionQueue({
                         value={table.searchValue}
                         onChange={table.onSearchChange}
                         onClear={table.clearSearch}
-                        placeholder="Search tenant, invoice, unit, property..."
+                        placeholder={t(
+                            'Search tenant, invoice, unit, property...',
+                        )}
                     />
                 </div>
 
@@ -623,14 +623,16 @@ export default function CollectionQueue({
                     empty={{
                         message:
                             currentUrgency === 'paid'
-                                ? 'No paid invoices this period.'
+                                ? t('No paid invoices this period.')
                                 : currentUrgency === 'partial'
-                                  ? 'No partially paid invoices.'
+                                  ? t('No partially paid invoices.')
                                   : currentUrgency === 'upcoming'
-                                    ? 'No upcoming invoices.'
-                                    : 'All caught up. Nothing needs attention.',
+                                    ? t('No upcoming invoices.')
+                                    : t(
+                                          'All caught up. Nothing needs attention.',
+                                      ),
                         createLabel:
-                            currentUrgency === '' ? 'View Paid' : undefined,
+                            currentUrgency === '' ? t('View Paid') : undefined,
                         onCreate:
                             currentUrgency === ''
                                 ? () => applyTab('paid')
@@ -643,7 +645,7 @@ export default function CollectionQueue({
                     <Collapsible defaultOpen={false}>
                         <CollapsibleTrigger className="group flex w-full items-center gap-2 py-2 text-sm font-medium text-muted-foreground hover:text-foreground">
                             <ChevronDown className="size-4 transition-transform group-data-[state=open]:rotate-180" />
-                            Recent Payments ({recentPayments.length})
+                            {t('Recent Payments')} ({recentPayments.length})
                         </CollapsibleTrigger>
                         <CollapsibleContent>
                             {recentPayments.length > 0 && (
@@ -672,6 +674,7 @@ export default function CollectionQueue({
                                                     +
                                                     {formatPrice(
                                                         payment.amount,
+                                                        payment.currency,
                                                     )}
                                                 </p>
                                                 <p className="text-xs text-muted-foreground">
@@ -692,7 +695,7 @@ export default function CollectionQueue({
                     <Collapsible defaultOpen={false}>
                         <CollapsibleTrigger className="group flex w-full items-center gap-2 py-2 text-sm font-medium text-muted-foreground hover:text-foreground">
                             <ChevronDown className="size-4 transition-transform group-data-[state=open]:rotate-180" />
-                            Reminder Activity ({recentReminders.length})
+                            {t('Reminder Activity')} ({recentReminders.length})
                         </CollapsibleTrigger>
                         <CollapsibleContent>
                             {recentReminders.length > 0 && (
@@ -710,9 +713,13 @@ export default function CollectionQueue({
                                                     {reminder.tenant_name}
                                                 </p>
                                                 <p className="text-xs text-muted-foreground">
-                                                    {REMINDER_LABELS[
-                                                        reminder.reminder_type
-                                                    ] ?? reminder.reminder_type}
+                                                    {t(
+                                                        REMINDER_LABELS[
+                                                            reminder
+                                                                .reminder_type
+                                                        ] ??
+                                                            reminder.reminder_type,
+                                                    )}
                                                     {' · '}
                                                     {reminder.channel}
                                                     {reminder.sent_at &&

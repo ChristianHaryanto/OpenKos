@@ -1,6 +1,7 @@
-import { router, useForm } from '@inertiajs/react';
+import { router, useForm, usePage } from '@inertiajs/react';
 import { Pencil, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { EntityTransferMenu } from '@/components/features/data-transfer/transfer-actions';
 import { InputError } from '@/components/shared';
 import { Button } from '@/components/ui/button';
 import {
@@ -21,6 +22,13 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import {
     Sheet,
     SheetContent,
     SheetDescription,
@@ -28,7 +36,10 @@ import {
     SheetTitle,
 } from '@/components/ui/sheet';
 import { Switch } from '@/components/ui/switch';
-import type { PropertyTypeOption } from '@/types';
+import { t } from '@/lib/i18n';
+import { propertyRentalModeOptions } from '@/lib/property-rental-mode';
+import propertyTypesRoutes from '@/routes/settings/property-types';
+import type { Auth, PropertyTypeOption } from '@/types';
 
 const BASE = '/settings/property-types';
 
@@ -43,6 +54,7 @@ function PropertyTypeFormSheet({
 }) {
     const { data, setData, submit, transform, processing, errors } = useForm({
         label: editing?.label ?? '',
+        default_rental_mode: editing?.default_rental_mode ?? 'unit',
     });
 
     function handleSubmit(e: React.FormEvent) {
@@ -65,12 +77,16 @@ function PropertyTypeFormSheet({
             <SheetContent className="sm:max-w-md">
                 <SheetHeader>
                     <SheetTitle>
-                        {editing ? 'Edit type' : 'New property type'}
+                        {editing ? t('Edit type') : t('New property type')}
                     </SheetTitle>
                     <SheetDescription>
                         {editing
-                            ? 'Rename this type. Its slug stays fixed so existing properties keep working.'
-                            : 'Add a classification. A slug is generated from the name.'}
+                            ? t(
+                                  'Rename this type. Its slug stays fixed so existing properties keep working.',
+                              )
+                            : t(
+                                  'Add a classification. A slug is generated from the name.',
+                              )}
                     </SheetDescription>
                 </SheetHeader>
 
@@ -78,7 +94,7 @@ function PropertyTypeFormSheet({
                     <form onSubmit={handleSubmit}>
                         <div className="space-y-6 pt-4">
                             <div className="grid gap-2">
-                                <Label htmlFor="label">Name</Label>
+                                <Label htmlFor="label">{t('Name')}</Label>
                                 <Input
                                     id="label"
                                     name="label"
@@ -86,10 +102,56 @@ function PropertyTypeFormSheet({
                                     onChange={(e) =>
                                         setData('label', e.target.value)
                                     }
-                                    placeholder="e.g. Guesthouse"
+                                    placeholder={t('e.g. Guesthouse')}
                                     required
                                 />
                                 <InputError message={errors.label} />
+                            </div>
+
+                            <div className="grid gap-2">
+                                <Label htmlFor="default_rental_mode">
+                                    {t('Default rental model')}
+                                </Label>
+                                <Select
+                                    value={data.default_rental_mode}
+                                    onValueChange={(value) =>
+                                        setData(
+                                            'default_rental_mode',
+                                            value as typeof data.default_rental_mode,
+                                        )
+                                    }
+                                >
+                                    <SelectTrigger
+                                        id="default_rental_mode"
+                                        className="w-full"
+                                    >
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {propertyRentalModeOptions.map(
+                                            (option) => (
+                                                <SelectItem
+                                                    key={option.value}
+                                                    value={option.value}
+                                                >
+                                                    {t(option.label)}
+                                                </SelectItem>
+                                            ),
+                                        )}
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-sm text-muted-foreground">
+                                    {t(
+                                        propertyRentalModeOptions.find(
+                                            (option) =>
+                                                option.value ===
+                                                data.default_rental_mode,
+                                        )?.description ?? '',
+                                    )}
+                                </p>
+                                <InputError
+                                    message={errors.default_rental_mode}
+                                />
                             </div>
 
                             <div className="flex items-center justify-end gap-4">
@@ -99,10 +161,10 @@ function PropertyTypeFormSheet({
                                     onClick={() => onOpenChange(false)}
                                     disabled={processing}
                                 >
-                                    Cancel
+                                    {t('Cancel')}
                                 </Button>
                                 <Button disabled={processing}>
-                                    {editing ? 'Save' : 'Add'}
+                                    {editing ? t('Save') : t('Add')}
                                 </Button>
                             </div>
                         </div>
@@ -118,6 +180,7 @@ export default function PropertyTypes({
 }: {
     propertyTypes: PropertyTypeOption[];
 }) {
+    const { auth } = usePage<{ auth: Auth }>().props;
     const [editing, setEditing] = useState<PropertyTypeOption | null>(null);
     const [sheetOpen, setSheetOpen] = useState(false);
     const [deleteConfirm, setDeleteConfirm] =
@@ -157,21 +220,33 @@ export default function PropertyTypes({
         <div className="space-y-6">
             <div className="flex items-start justify-between gap-4">
                 <div>
-                    <h2 className="text-lg font-medium">Property Types</h2>
+                    <h2 className="text-lg font-medium">
+                        {t('Property Types')}
+                    </h2>
                     <p className="mt-1 text-sm text-muted-foreground">
-                        The classifications available when creating a property.
-                        Add your own (e.g. Kos, Riad, Guesthouse); deactivate
-                        ones you don&apos;t use.
+                        {t(
+                            "The classifications available when creating a property. Add your own (e.g. Kos, Riad, Guesthouse); deactivate ones you don't use.",
+                        )}
                     </p>
                 </div>
-                <Button onClick={openNew}>Add type</Button>
+                <div className="flex items-center gap-2">
+                    <Button onClick={openNew}>{t('Add type')}</Button>
+                    <EntityTransferMenu
+                        datasetLabel={t('Property types')}
+                        canExport={
+                            auth.role === 'owner' ||
+                            auth.permissions.includes('properties.export')
+                        }
+                        exportHref={propertyTypesRoutes.transfer.export.url()}
+                    />
+                </div>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>Types</CardTitle>
+                    <CardTitle>{t('Types')}</CardTitle>
                     <CardDescription>
-                        A type in use can be deactivated but not deleted.
+                        {t('A type in use can be deactivated but not deleted.')}
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -180,16 +255,19 @@ export default function PropertyTypes({
                             <thead>
                                 <tr className="border-b bg-muted/50 text-left text-muted-foreground">
                                     <th className="px-4 py-3 font-medium">
-                                        Label
+                                        {t('Label')}
                                     </th>
                                     <th className="px-4 py-3 font-medium">
-                                        Slug
+                                        {t('Slug')}
                                     </th>
                                     <th className="px-4 py-3 font-medium">
-                                        In use
+                                        {t('Default rental model')}
                                     </th>
                                     <th className="px-4 py-3 font-medium">
-                                        Active
+                                        {t('In use')}
+                                    </th>
+                                    <th className="px-4 py-3 font-medium">
+                                        {t('Active')}
                                     </th>
                                     <th className="px-4 py-3 font-medium" />
                                 </tr>
@@ -205,6 +283,15 @@ export default function PropertyTypes({
                                         </td>
                                         <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                                             {type.slug}
+                                        </td>
+                                        <td className="px-4 py-3 text-muted-foreground">
+                                            {t(
+                                                propertyRentalModeOptions.find(
+                                                    (option) =>
+                                                        option.value ===
+                                                        type.default_rental_mode,
+                                                )?.label ?? 'Individual units',
+                                            )}
                                         </td>
                                         <td className="px-4 py-3 text-muted-foreground tabular-nums">
                                             {type.properties_count ?? 0}
@@ -266,9 +353,9 @@ export default function PropertyTypes({
             >
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Delete type</DialogTitle>
+                        <DialogTitle>{t('Delete type')}</DialogTitle>
                         <DialogDescription>
-                            Delete{' '}
+                            {t('Delete')}{' '}
                             <span className="font-medium">
                                 {deleteConfirm?.label}
                             </span>
@@ -280,10 +367,10 @@ export default function PropertyTypes({
                             variant="outline"
                             onClick={() => setDeleteConfirm(null)}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button variant="destructive" onClick={confirmDelete}>
-                            Delete
+                            {t('Delete')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>

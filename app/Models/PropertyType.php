@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Concerns\SerializesDatesWithTimezone;
+use App\Enums\PropertyRentalMode;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -15,16 +17,18 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 #[Fillable([
     'slug',
     'label',
+    'default_rental_mode',
     'is_active',
     'sort_order',
 ])]
 class PropertyType extends Model
 {
-    use HasFactory;
+    use HasFactory, SerializesDatesWithTimezone;
 
     protected function casts(): array
     {
         return [
+            'default_rental_mode' => PropertyRentalMode::class,
             'is_active' => 'boolean',
         ];
     }

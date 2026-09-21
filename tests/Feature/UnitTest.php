@@ -1,13 +1,21 @@
 <?php
 
+use App\Actions\Units\AssignUnitTypeToUnits;
+use App\Data\Unit\BulkAssignUnitTypeData;
 use App\Models\Lease;
 use App\Models\Property;
+use App\Models\Setting;
 use App\Models\Unit;
+use App\Models\UnitRate;
+use App\Models\UnitType;
 use App\Models\User;
 use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 
 uses()->beforeEach(function () {
     $this->seed(RoleAndPermissionSeeder::class);
+    Setting::set('supported_currencies', ['IDR', 'USD']);
 });
 
 describe('authorization', function () {
@@ -20,7 +28,7 @@ describe('authorization', function () {
     it('returns 403 for users without units.view permission', function () {
         $user = User::factory()->create();
         $property = Property::factory()->create();
-        $unit = Unit::factory()->for($property)->create();
+        $unit = Unit::factory()->for($property)->create(['name' => 'Unit 001']);
 
         $this->actingAs($user)
             ->delete(route('properties.units.destroy', [$property, $unit]))
@@ -32,7 +40,7 @@ describe('archive lifecycle', function () {
     it('restores a soft-deleted unit', function () {
         $user = User::factory()->owner()->create();
         $property = Property::factory()->create();
-        $unit = Unit::factory()->for($property)->create();
+        $unit = Unit::factory()->for($property)->create(['name' => 'Unit 001']);
         $unit->delete();
 
         expect(Unit::count())->toBe(0);
@@ -91,10 +99,127 @@ describe('authorization', function () {
 });
 
 describe('CRUD', function () {
+    it('assigns one Unit Type to multiple Units atomically', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $targetType = UnitType::factory()->for($property)->create();
+        $units = Unit::factory()->for($property)->count(2)->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.bulk-assign-unit-type', $property), [
+                'unit_ids' => $units->modelKeys(),
+                'unit_type_id' => $targetType->id,
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($units->fresh()->pluck('unit_type_id')->all())
+            ->toBe([$targetType->id, $targetType->id]);
+    });
+
+    it('returns a failure result and leaves Units unchanged when a selection becomes stale', function () {
+        $property = Property::factory()->create();
+        $targetType = UnitType::factory()->for($property)->create();
+        $units = Unit::factory()->for($property)->count(2)->create();
+        $units->last()->delete();
+
+        $result = app(AssignUnitTypeToUnits::class)->execute($property, new BulkAssignUnitTypeData(
+            unitIds: $units->modelKeys(),
+            unitTypeId: $targetType->id,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorField)->toBe('unit_ids')
+            ->and($units->first()->fresh()->unit_type_id)->toBeNull()
+            ->and($units->last()->fresh()->unit_type_id)->toBeNull();
+    });
+
+    it('returns a failure result when the target Unit Type is inactive', function () {
+        $property = Property::factory()->create();
+        $inactiveType = UnitType::factory()->for($property)->create(['is_active' => false]);
+        $unit = Unit::factory()->for($property)->create();
+
+        $result = app(AssignUnitTypeToUnits::class)->execute($property, new BulkAssignUnitTypeData(
+            unitIds: [$unit->id],
+            unitTypeId: $inactiveType->id,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorField)->toBe('unit_type_id')
+            ->and($unit->fresh()->unit_type_id)->toBeNull();
+    });
+
+    it('rejects a bulk assignment across property boundaries without changing Units', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $otherProperty = Property::factory()->create();
+        $targetType = UnitType::factory()->for($property)->create();
+        $unit = Unit::factory()->for($property)->create();
+        $otherUnit = Unit::factory()->for($otherProperty)->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.bulk-assign-unit-type', $property), [
+                'unit_ids' => [$unit->id, $otherUnit->id],
+                'unit_type_id' => $targetType->id,
+            ])
+            ->assertSessionHasErrors('unit_ids.1');
+
+        expect($unit->fresh()->unit_type_id)->toBeNull()
+            ->and($otherUnit->fresh()->unit_type_id)->toBeNull();
+    });
+
+    it('denies an admin from bulk assigning Units in an unassigned property', function () {
+        $admin = User::factory()->admin()->create();
+        $property = Property::factory()->create();
+        $targetType = UnitType::factory()->for($property)->create();
+        $unit = Unit::factory()->for($property)->create();
+
+        $this->actingAs($admin)
+            ->post(route('properties.units.bulk-assign-unit-type', $property), [
+                'unit_ids' => [$unit->id],
+                'unit_type_id' => $targetType->id,
+            ])
+            ->assertForbidden();
+    });
+
+    it('rejects inactive and cross-property Unit Type targets', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $otherProperty = Property::factory()->create();
+        $inactiveType = UnitType::factory()->for($property)->create(['is_active' => false]);
+        $otherType = UnitType::factory()->for($otherProperty)->create();
+        $unit = Unit::factory()->for($property)->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.bulk-assign-unit-type', $property), [
+                'unit_ids' => [$unit->id],
+                'unit_type_id' => $inactiveType->id,
+            ])
+            ->assertSessionHasErrors('unit_type_id');
+
+        $this->actingAs($user)
+            ->post(route('properties.units.bulk-assign-unit-type', $property), [
+                'unit_ids' => [$unit->id],
+                'unit_type_id' => $otherType->id,
+            ])
+            ->assertSessionHasErrors('unit_type_id');
+
+        expect($unit->fresh()->unit_type_id)->toBeNull();
+    });
+
     it('lists units on the index page', function () {
         $user = User::factory()->owner()->create();
         $property = Property::factory()->create();
-        Unit::factory()->count(3)->for($property)->create();
+        $unit = Unit::factory()->for($property)->create(['name' => 'Unit 001']);
+        $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'year',
+            'amount' => '12000.00',
+            'currency' => 'USD',
+            'is_active' => false,
+        ]);
+        Unit::factory()->for($property)->create(['name' => 'Unit 002']);
+        Unit::factory()->for($property)->create(['name' => 'Unit 003']);
 
         $this->actingAs($user)
             ->get(route('properties.units.index', $property))
@@ -102,6 +227,29 @@ describe('CRUD', function () {
             ->assertInertia(fn ($page) => $page
                 ->component('properties/units/index')
                 ->has('units.data', 3)
+                ->has('units.data.0.rates', 2)
+                ->has('availableUnits.0.active_rates.0.amount')
+            );
+    });
+
+    it('shows rates in the unit workspace', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('properties.units.rates', [$property, $unit]))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/units/rates')
+                ->where('setting.supported_currencies', ['IDR', 'USD'])
+                ->where('unit.rates.1.currency', 'USD')
             );
     });
 
@@ -124,6 +272,28 @@ describe('CRUD', function () {
         expect($unit->property_id)->toBe($property->id);
     });
 
+    it('preserves the active flag for new rates during creation', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'year',
+                    'amount' => '120.00',
+                    'currency' => 'USD',
+                    'is_active' => false,
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect(Unit::query()->firstOrFail()->rates()->value('is_active'))->toBeFalse();
+    });
+
     it('validates required fields on create', function () {
         $user = User::factory()->owner()->create();
         $property = Property::factory()->create();
@@ -142,11 +312,151 @@ describe('CRUD', function () {
             ->put(route('properties.units.update', [$property, $unit]), [
                 'name' => 'Unit 102',
                 'capacity' => 2,
+                'updated_at' => $unit->updated_at->toISOString(),
             ]);
 
         $unit->refresh();
 
         expect($unit->name)->toBe('Unit 102');
+    });
+
+    it('rejects stale unit edits without changing rates', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->firstOrFail();
+        $staleUpdatedAt = $unit->updated_at->toISOString();
+
+        DB::table('units')->where('id', $unit->id)->update([
+            'name' => 'Changed elsewhere',
+            'updated_at' => now()->addSecond(),
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => 'Stale edit',
+                'capacity' => $unit->capacity,
+                'updated_at' => $staleUpdatedAt,
+                'rates' => [],
+            ])
+            ->assertSessionHasErrors('updated_at');
+
+        expect($unit->fresh()->name)->toBe('Changed elsewhere')
+            ->and($rate->fresh()->is_active)->toBeTrue();
+    });
+
+    it('preserves inactive rates when updating a unit', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $activeRate = $unit->activeRates()->firstOrFail();
+        $inactiveRate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'year',
+            'amount' => '12000.00',
+            'currency' => 'USD',
+            'is_active' => false,
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $activeRate->id,
+                    'billing_interval' => $activeRate->billing_interval,
+                    'billing_unit' => $activeRate->billing_unit->value,
+                    'amount' => $activeRate->amount,
+                    'currency' => $activeRate->currency,
+                    'is_active' => true,
+                ]],
+            ])
+            ->assertRedirect();
+
+        expect($inactiveRate->fresh())->not->toBeNull();
+    });
+
+    it('reactivates a persisted inactive rate', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'year',
+            'amount' => '12000.00',
+            'currency' => 'USD',
+            'is_active' => false,
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $rate->id,
+                    'billing_interval' => $rate->billing_interval,
+                    'billing_unit' => $rate->billing_unit->value,
+                    'amount' => $rate->amount,
+                    'currency' => $rate->currency,
+                    'is_active' => true,
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($rate->fresh()->is_active)->toBeTrue();
+
+        $this->actingAs($user)
+            ->get(route('properties.units.rates', [$property, $unit]))
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/units/rates')
+                ->where('unit.rates', function ($rates) use ($rate): bool {
+                    $updatedRate = collect($rates)->firstWhere('id', $rate->id);
+
+                    return $updatedRate !== null
+                        && $updatedRate['is_active'] === true;
+                })
+            );
+    });
+
+    it('deactivates a persisted active rate and refreshes the workspace state', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->activeRates()->firstOrFail();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $rate->id,
+                    'billing_interval' => $rate->billing_interval,
+                    'billing_unit' => $rate->billing_unit->value,
+                    'amount' => $rate->amount,
+                    'currency' => $rate->currency,
+                    'is_active' => false,
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($rate->fresh()->is_active)->toBeFalse();
+
+        $this->actingAs($user)
+            ->get(route('properties.units.rates', [$property, $unit]))
+            ->assertInertia(fn ($page) => $page
+                ->component('properties/units/rates')
+                ->where('unit.rates', function ($rates) use ($rate): bool {
+                    $updatedRate = collect($rates)->firstWhere('id', $rate->id);
+
+                    return $updatedRate !== null
+                        && $updatedRate['is_active'] === false;
+                })
+            );
     });
 
     it('deletes a unit via soft delete', function () {
@@ -177,6 +487,37 @@ describe('CRUD', function () {
             ->has('units.data', 1)
             ->where('status', 'occupied')
         );
+    });
+
+    it('filters Units by Unit Type assignment state', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unitType = UnitType::factory()->for($property)->create();
+        Unit::factory()->for($property)->create(['unit_type_id' => $unitType->id]);
+        Unit::factory()->for($property)->create(['unit_type_id' => null]);
+
+        $this->actingAs($user)
+            ->get(route('properties.units.index', [$property, 'assignment' => 'unassigned']))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('units.data', 1)
+                ->where('assignment', 'unassigned')
+            );
+    });
+
+    it('applies multiple unit status filters', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        Unit::factory()->for($property)->create(['status' => 'available']);
+        Unit::factory()->for($property)->occupied()->create();
+        Unit::factory()->for($property)->maintenance()->create();
+
+        $this->actingAs($user)
+            ->get(route('properties.units.index', [$property, 'status' => 'available,occupied']))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('units.data', 2)
+            );
     });
 
     it('filters archived units', function () {
@@ -250,6 +591,7 @@ describe('cross-property access', function () {
             ->put(route('properties.units.update', [$propertyB, $unit]), [
                 'name' => 'Hacked',
                 'capacity' => 1,
+                'updated_at' => $unit->updated_at->toISOString(),
             ])
             ->assertForbidden();
     });
@@ -316,6 +658,554 @@ describe('active rates ordering', function () {
         $first = $unit->activeRates()->first();
 
         expect($first->billing_unit->value)->toBe('month')
-            ->and($first->amount)->toBe('1500000.00');
+            ->and($first->amount)->toBe('1500000.000');
+    });
+});
+
+describe('currency-specific rates', function () {
+    it('rejects new rate variants outside supported currencies', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        Setting::set('supported_currencies', ['IDR']);
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'month',
+                    'amount' => '95.00',
+                    'currency' => 'USD',
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.currency');
+    });
+
+    it('uses the fresh default currency for omitted new-rate currency values', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        Setting::set('currency', 'IDR');
+        Setting::set('supported_currencies', ['IDR', 'USD']);
+        Setting::get('site_name');
+
+        DB::table('settings')->where('key', 'currency')->update(['value' => 'USD']);
+        DB::table('settings')
+            ->where('key', 'supported_currencies')
+            ->update(['value' => json_encode(['USD'], JSON_THROW_ON_ERROR)]);
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'month',
+                    'amount' => '95.25',
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        $unit = Unit::query()->where('name', 'Unit 101')->firstOrFail();
+
+        expect($unit->rates()->value('currency'))->toBe('USD')
+            ->and($unit->rates()->value('amount'))->toBe('95.250');
+    });
+
+    it('keeps existing rates usable after their currency is removed', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]);
+        Setting::set('supported_currencies', ['IDR']);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $rate->id,
+                    'billing_interval' => $rate->billing_interval,
+                    'billing_unit' => $rate->billing_unit->value,
+                    'amount' => '100.00',
+                    'currency' => 'USD',
+                    'is_active' => false,
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($rate->fresh()->amount)->toBe('100.000')
+            ->and($rate->fresh()->is_active)->toBeFalse();
+    });
+
+    it('allows independent prices for the same billing period in different currencies', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [
+                    [
+                        'billing_interval' => 1,
+                        'billing_unit' => 'month',
+                        'amount' => '1500000',
+                        'currency' => 'IDR',
+                    ],
+                    [
+                        'billing_interval' => 1,
+                        'billing_unit' => 'month',
+                        'amount' => '95.00',
+                        'currency' => 'USD',
+                    ],
+                ],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        $unit = Unit::query()->where('name', 'Unit 101')->firstOrFail();
+
+        expect($unit->rates()->orderBy('currency')->pluck('currency')->all())
+            ->toBe(['IDR', 'USD'])
+            ->and($unit->rates()->where('currency', 'USD')->value('amount'))
+            ->toBe('95.000');
+    });
+
+    it('rejects duplicate currency variants in one request', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [
+                    [
+                        'billing_interval' => 1,
+                        'billing_unit' => 'month',
+                        'amount' => '1500000',
+                        'currency' => 'IDR',
+                    ],
+                    [
+                        'billing_interval' => 1,
+                        'billing_unit' => 'month',
+                        'amount' => '1600000',
+                        'currency' => 'IDR',
+                    ],
+                ],
+            ])
+            ->assertSessionHasErrors('rates.1.currency');
+    });
+
+    it('rejects malformed rate rows without throwing', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => ['invalid'],
+            ])
+            ->assertSessionHasErrors('rates.0');
+    });
+
+    it('rejects malformed rate containers without throwing', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => 'invalid',
+            ])
+            ->assertSessionHasErrors('rates');
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 102',
+                'capacity' => 1,
+                'rates' => null,
+            ])
+            ->assertSessionHasErrors('rates');
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 103',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'month',
+                    'amount' => '1000000',
+                    'currency' => ['IDR'],
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.currency');
+
+        $unit = Unit::factory()->for($property)->create();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => 'invalid',
+            ])
+            ->assertSessionHasErrors('rates');
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => null,
+            ])
+            ->assertSessionHasErrors('rates');
+    });
+
+    it('rejects rate intervals outside the database range', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('properties.units.store', $property), [
+                'name' => 'Unit 101',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 256,
+                    'billing_unit' => 'month',
+                    'amount' => '1000000',
+                    'currency' => 'IDR',
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.billing_interval');
+
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->firstOrFail();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $rate->id,
+                    'billing_interval' => 256,
+                    'billing_unit' => $rate->billing_unit->value,
+                    'amount' => $rate->amount,
+                    'currency' => $rate->currency,
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.billing_interval');
+    });
+
+    it('rejects duplicate rate IDs in an update', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->firstOrFail();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [
+                    [
+                        'id' => $rate->id,
+                        'billing_interval' => 1,
+                        'billing_unit' => 'month',
+                        'amount' => $rate->amount,
+                        'currency' => $rate->currency,
+                    ],
+                    [
+                        'id' => $rate->id,
+                        'billing_interval' => 1,
+                        'billing_unit' => 'year',
+                        'amount' => $rate->amount,
+                        'currency' => $rate->currency,
+                    ],
+                ],
+            ])
+            ->assertSessionHasErrors('rates.1.id');
+    });
+
+    it('keeps persisted rate identity immutable', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->firstOrFail();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $rate->id,
+                    'billing_interval' => 2,
+                    'billing_unit' => $rate->billing_unit->value,
+                    'amount' => $rate->amount,
+                    'currency' => $rate->currency,
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.billing_interval');
+
+        expect($rate->fresh()->billing_interval)->toBe(1);
+
+        $rate->billing_unit = 'year';
+
+        expect(fn () => $rate->save())->toThrow(LogicException::class);
+
+        $rate = $rate->fresh();
+        $otherUnit = Unit::factory()->for($property)->create();
+        $rate->unit_id = $otherUnit->id;
+
+        expect(fn () => $rate->save())->toThrow(LogicException::class);
+    });
+
+    it('preserves the active flag for new rates during updates', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'year',
+                    'amount' => '120.00',
+                    'currency' => 'USD',
+                    'is_active' => false,
+                ]],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($unit->rates()->where('billing_unit', 'year')->value('is_active'))->toBeFalse();
+    });
+
+    it('translates concurrent rate uniqueness conflicts into validation errors', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $dispatcher = UnitRate::getEventDispatcher();
+        $testDispatcher = clone $dispatcher;
+        $injected = false;
+
+        UnitRate::setEventDispatcher($testDispatcher);
+        UnitRate::creating(function (UnitRate $rate) use (&$injected): void {
+            if ($injected) {
+                return;
+            }
+
+            $injected = true;
+            DB::table('unit_rates')->insert([
+                'unit_id' => $rate->unit_id,
+                'billing_interval' => $rate->billing_interval,
+                'billing_unit' => $rate->billing_unit->value,
+                'amount' => $rate->amount,
+                'currency' => $rate->currency,
+                'is_active' => $rate->is_active,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        try {
+            $response = $this->actingAs($user)
+                ->put(route('properties.units.update', [$property, $unit]), [
+                    'name' => $unit->name,
+                    'capacity' => $unit->capacity,
+                    'updated_at' => $unit->updated_at->toISOString(),
+                    'rates' => [[
+                        'billing_interval' => 1,
+                        'billing_unit' => 'year',
+                        'amount' => '120.00',
+                        'currency' => 'USD',
+                    ]],
+                ]);
+        } finally {
+            UnitRate::setEventDispatcher($dispatcher);
+        }
+
+        $response->assertSessionHasErrors('rates');
+        expect($unit->rates()->where('billing_unit', 'year')->exists())->toBeFalse();
+    });
+
+    it('rolls back unit creation when an initial rate fails', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $dispatcher = UnitRate::getEventDispatcher();
+        $testDispatcher = clone $dispatcher;
+
+        UnitRate::setEventDispatcher($testDispatcher);
+        UnitRate::creating(function (): void {
+            throw new RuntimeException('rate insert failed');
+        });
+
+        try {
+            $this->actingAs($user)->post(route('properties.units.store', $property), [
+                'name' => 'Atomic Unit',
+                'capacity' => 1,
+                'rates' => [[
+                    'billing_interval' => 1,
+                    'billing_unit' => 'month',
+                    'amount' => '100.00',
+                    'currency' => 'USD',
+                ]],
+            ]);
+        } catch (RuntimeException $exception) {
+            expect($exception->getMessage())->toBe('rate insert failed');
+        } finally {
+            UnitRate::setEventDispatcher($dispatcher);
+        }
+
+        expect(Unit::query()
+            ->where('property_id', $property->id)
+            ->where('name', 'Atomic Unit')
+            ->exists())->toBeFalse();
+    });
+
+    it('deactivates omitted rates without breaking lease lineage', function () {
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $rate = $unit->rates()->firstOrFail();
+        $lease = Lease::factory()->create([
+            'unit_id' => $unit->id,
+            'unit_rate_id' => $rate->id,
+            'currency' => $rate->currency,
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($rate->fresh()->is_active)->toBeFalse()
+            ->and($lease->fresh()->unit_rate_id)->toBe($rate->id);
+    });
+
+    it('enforces currency variant uniqueness at the database level', function () {
+        $unit = Unit::factory()->create();
+
+        $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]);
+
+        expect(fn () => $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '100.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]))->toThrow(QueryException::class);
+    });
+
+    it('rejects duplicate effective currencies for legacy null rates', function () {
+        Setting::set('currency', 'IDR');
+        $unit = Unit::factory()->create();
+        $rate = $unit->rates()->firstOrFail();
+
+        DB::table('unit_rates')->where('id', $rate->id)->update(['currency' => null]);
+
+        $user = User::factory()->owner()->create();
+        $response = $this->actingAs($user)
+            ->put(route('properties.units.update', [$unit->property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [
+                    [
+                        'id' => $rate->id,
+                        'billing_interval' => $rate->billing_interval,
+                        'billing_unit' => $rate->billing_unit->value,
+                        'amount' => $rate->amount,
+                        'currency' => 'IDR',
+                        'is_active' => true,
+                    ],
+                    [
+                        'billing_interval' => $rate->billing_interval,
+                        'billing_unit' => $rate->billing_unit->value,
+                        'amount' => '1000000',
+                        'currency' => 'IDR',
+                    ],
+                ],
+            ]);
+
+        $response->assertSessionHasErrors('rates.1.currency');
+    });
+
+    it('rejects updates that collide with preserved inactive rates', function () {
+        Setting::set('currency', 'IDR');
+        $user = User::factory()->owner()->create();
+        $property = Property::factory()->create();
+        $unit = Unit::factory()->for($property)->create();
+        $activeRate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'year',
+            'amount' => '120.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]);
+        $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+            'is_active' => false,
+        ]);
+
+        $this->actingAs($user)
+            ->put(route('properties.units.update', [$property, $unit]), [
+                'name' => $unit->name,
+                'capacity' => $unit->capacity,
+                'updated_at' => $unit->updated_at->toISOString(),
+                'rates' => [[
+                    'id' => $activeRate->id,
+                    'billing_interval' => 1,
+                    'billing_unit' => 'month',
+                    'amount' => '100.00',
+                    'currency' => 'USD',
+                    'is_active' => true,
+                ]],
+            ])
+            ->assertSessionHasErrors('rates.0.currency');
+
+        expect($activeRate->fresh()->billing_unit->value)->toBe('year');
+    });
+
+    it('does not reinterpret an existing rate when the default currency changes', function () {
+        Setting::set('currency', 'IDR');
+        $unit = Unit::factory()->withRate(1_500_000)->create();
+        $rate = $unit->rates()->firstOrFail();
+
+        Setting::set('currency', 'USD');
+
+        expect($rate->fresh()->currency)->toBe('IDR');
     });
 });

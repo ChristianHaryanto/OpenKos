@@ -1,4 +1,5 @@
 import React from 'react';
+import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 export type MetricVariant =
@@ -13,11 +14,14 @@ export type MetricEmphasis = 'neutral' | 'subtle' | 'attention';
 
 export interface MetricCardProps {
     label: string;
-    value: string | number;
-    subtext?: string;
+    subParams?: React.ReactNode;
+    value: React.ReactNode;
+    subtext?: React.ReactNode;
     variant?: MetricVariant;
     emphasis?: MetricEmphasis;
     icon?: React.ComponentType<{ className?: string }>;
+    valueFullWidth?: boolean;
+    subtextFullWidth?: boolean;
     progress?: number;
     onClick?: () => void;
     className?: string;
@@ -211,11 +215,14 @@ const VARIANT_STYLES: Record<
 
 export function MetricCard({
     label,
+    subParams,
     value,
     subtext,
     variant = 'neutral',
     emphasis = 'subtle',
     icon: Icon,
+    valueFullWidth = false,
+    subtextFullWidth = false,
     progress,
     onClick,
     className,
@@ -243,18 +250,25 @@ export function MetricCard({
                     <p className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
                         {label}
                     </p>
-                    <p
-                        className={cn(
-                            'mt-1.5 text-2xl font-bold tracking-tight tabular-nums sm:text-3xl',
-                            styles.value,
-                        )}
-                    >
-                        {value}
-                    </p>
-                    {subtext && (
-                        <p className="mt-1 text-xs font-medium text-muted-foreground">
+                    {subParams && (
+                        <div className="mt-1 text-xs font-medium text-muted-foreground">
+                            {subParams}
+                        </div>
+                    )}
+                    {!valueFullWidth && (
+                        <div
+                            className={cn(
+                                'mt-1.5 text-2xl font-bold tabular-nums sm:text-3xl',
+                                styles.value,
+                            )}
+                        >
+                            {value}
+                        </div>
+                    )}
+                    {subtext && !subtextFullWidth && (
+                        <div className="mt-1 text-xs font-medium text-muted-foreground">
                             {subtext}
-                        </p>
+                        </div>
                     )}
                 </div>
 
@@ -270,10 +284,27 @@ export function MetricCard({
                 )}
             </div>
 
+            {valueFullWidth && (
+                <div
+                    className={cn(
+                        'mt-3 border-t border-border pt-3 text-xs font-medium',
+                        styles.value,
+                    )}
+                >
+                    {value}
+                </div>
+            )}
+
+            {subtext && subtextFullWidth && (
+                <div className="mt-3 border-t border-border pt-3 text-xs font-medium text-muted-foreground">
+                    {subtext}
+                </div>
+            )}
+
             {progress !== undefined && (
                 <div className="mt-3">
                     <div className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
-                        <span>Progress</span>
+                        <span>{t('Progress')}</span>
                         <span className="tabular-nums">{progress}%</span>
                     </div>
                     <div

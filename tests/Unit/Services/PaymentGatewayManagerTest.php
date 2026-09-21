@@ -2,15 +2,13 @@
 
 use App\Services\Payments\PaymentGatewayManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use OpenKOS\Core\Contracts\PaymentGateway;
-use OpenKOS\Core\Data\Payment\CheckoutInstructions;
-use OpenKOS\Core\Data\Payment\PaymentCreationResult;
-use OpenKOS\Core\Data\Payment\PaymentRequest;
-use OpenKOS\Core\Data\Payment\PaymentWebhookRequest;
-use OpenKOS\Core\Data\Payment\PaymentWebhookResult;
-use OpenKOS\Core\Enums\PaymentStatus;
 use OpenKOS\Platform\Payment\PaymentRegistry;
 use OpenKOS\Platform\Settings\SettingsManager;
+use Tests\Support\Fakes\BrokenManagerTestPaymentGateway;
+use Tests\Support\Fakes\CurrencyAwareManagerTestPaymentGateway;
+use Tests\Support\Fakes\MalformedCurrencyManagerTestPaymentGateway;
+use Tests\Support\Fakes\ManagerTestPaymentGateway;
+use Tests\Support\Fakes\MismatchedManagerTestPaymentGateway;
 use Tests\TestCase;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -47,7 +45,55 @@ it('returns provider metadata without exposing secret values', function () {
         ->and($provider['configuration_schema']['secret_key']['visible_when'])->toBe([
             'field' => 'environment',
             'value' => 'sandbox',
-        ]);
+        ])
+        ->and($provider['supported_currencies'])->toBeNull();
+});
+
+it('exposes and enforces declared gateway currencies', function () {
+    $registry = new PaymentRegistry;
+    $registry->registerGateway('currency-aware', CurrencyAwareManagerTestPaymentGateway::class);
+    $manager = new PaymentGatewayManager($registry, app(SettingsManager::class), app());
+    $gateway = $manager->find('currency-aware');
+
+    expect($gateway)->not->toBeNull()
+        ->and($manager->supportedCurrencies($gateway))->toBe(['IDR'])
+        ->and($manager->supportsCurrency($gateway, 'idr'))->toBeTrue()
+        ->and($manager->supportsCurrency($gateway, 'USD'))->toBeFalse();
+});
+
+it('fails closed for malformed gateway currency declarations', function () {
+    $registry = new PaymentRegistry;
+    $registry->registerGateway('malformed-currency', MalformedCurrencyManagerTestPaymentGateway::class);
+    $manager = new PaymentGatewayManager($registry, app(SettingsManager::class), app());
+    $gateway = $manager->find('malformed-currency');
+
+    expect($gateway)->not->toBeNull()
+        ->and($manager->supportsCurrency($gateway, 'IDR'))->toBeFalse()
+        ->and($manager->all()[0]['status'])->toBe('unavailable');
+});
+
+it('preserves an explicitly empty currency declaration', function () {
+    $gateway = new class extends CurrencyAwareManagerTestPaymentGateway
+    {
+        public function key(): string
+        {
+            return 'no-currencies';
+        }
+
+        /**
+         * @return list<string>
+         */
+        public function supportedCurrencies(): array
+        {
+            return [];
+        }
+    };
+    $registry = new PaymentRegistry;
+    $registry->registerGateway('no-currencies', $gateway);
+    $manager = new PaymentGatewayManager($registry, app(SettingsManager::class), app());
+
+    expect($manager->supportedCurrencies($gateway))->toBe([])
+        ->and($manager->supportsCurrency($gateway, 'IDR'))->toBeFalse();
 });
 
 it('resolves only a configured active gateway', function () {
@@ -85,6 +131,7 @@ it('keeps broken providers visible without making enumeration throw', function (
 
     expect($provider['status'])->toBe('unavailable')
         ->and($provider['error'])->toBe('This payment gateway is unavailable.')
+        ->and($provider['supported_currencies'])->toBeNull()
         ->and($gateway->find('broken/gateway'))->toBeNull();
 });
 
@@ -97,118 +144,3 @@ it('rejects gateways whose contract key differs from the registry key', function
     expect($gateway->find('registry/gateway'))->toBeNull()
         ->and($gateway->all()[0]['status'])->toBe('unavailable');
 });
-
-class ManagerTestPaymentGateway implements PaymentGateway
-{
-    public function __construct(public array $config = []) {}
-
-    public function key(): string
-    {
-        return 'test/gateway';
-    }
-
-    public function displayName(): string
-    {
-        return 'Test Gateway';
-    }
-
-    public function createPayment(PaymentRequest $request): PaymentCreationResult
-    {
-        return new PaymentCreationResult(
-            providerReference: 'provider-reference',
-            status: PaymentStatus::Pending,
-            amount: $request->amount,
-            instructions: new CheckoutInstructions,
-        );
-    }
-
-    public function handleCallback(PaymentWebhookRequest $request): PaymentWebhookResult
-    {
-        return new PaymentWebhookResult(
-            eventReference: 'event-reference',
-            providerReference: 'provider-reference',
-            status: PaymentStatus::Pending,
-        );
-    }
-
-    public function configurationSchema(): array
-    {
-        return [
-            'environment' => [
-                'label' => 'Environment',
-                'type' => 'select',
-                'required' => true,
-                'presentation' => 'segmented',
-                'default' => 'sandbox',
-                'options' => [
-                    ['value' => 'sandbox', 'label' => 'Sandbox'],
-                    ['value' => 'production', 'label' => 'Production'],
-                ],
-            ],
-            'webhook_setup' => [
-                'label' => 'Webhook setup',
-                'type' => 'info',
-                'instructions' => [
-                    'Open the webhook settings.',
-                    'Add the webhook URL shown below.',
-                ],
-                'link' => [
-                    'label' => 'Open webhook settings',
-                    'url' => 'https://example.test/webhooks',
-                ],
-                'url' => '/api/webhooks/test',
-            ],
-            'secret_key' => [
-                'label' => 'Secret key',
-                'type' => 'password',
-                'required' => true,
-                'description' => 'Keep this value secret.',
-                'visible_when' => [
-                    'field' => 'environment',
-                    'value' => 'sandbox',
-                ],
-            ],
-        ];
-    }
-}
-
-class BrokenManagerTestPaymentGateway implements PaymentGateway
-{
-    public function __construct()
-    {
-        throw new RuntimeException('broken gateway');
-    }
-
-    public function key(): string
-    {
-        return 'broken/gateway';
-    }
-
-    public function displayName(): string
-    {
-        return 'Broken Gateway';
-    }
-
-    public function createPayment(PaymentRequest $request): PaymentCreationResult
-    {
-        throw new RuntimeException('broken gateway');
-    }
-
-    public function handleCallback(PaymentWebhookRequest $request): PaymentWebhookResult
-    {
-        throw new RuntimeException('broken gateway');
-    }
-
-    public function configurationSchema(): array
-    {
-        return [];
-    }
-}
-
-class MismatchedManagerTestPaymentGateway extends ManagerTestPaymentGateway
-{
-    public function key(): string
-    {
-        return 'provider/gateway';
-    }
-}

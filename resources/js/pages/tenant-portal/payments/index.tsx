@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { PAYMENT_METHOD_LABELS } from '@/lib/constants/billing';
 import { formatDate, formatPeriod, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import { index as billingIndex } from '@/routes/portal/billing';
 import {
     invoices as invoiceHistory,
@@ -18,6 +19,7 @@ import {
 import { show as showInvoice } from '@/routes/portal/billing/invoices';
 import type {
     Invoice,
+    MoneyAggregate,
     PaginatedData,
     TenantLeaseContext as LeaseContext,
 } from '@/types';
@@ -48,7 +50,7 @@ export default function Payments({
     finalizedPayments: PortalPayment[];
     finalizedPaymentCount: number;
     outstandingSummary: {
-        amount: string;
+        amounts: MoneyAggregate[];
         count: number;
         next_due_date: string | null;
         pending_payment_count: number;
@@ -112,10 +114,10 @@ export default function Payments({
 
     return (
         <div className="flex w-full flex-1 flex-col gap-6 p-4">
-            <Head title="Billing" />
+            <Head title={t('Billing')} />
 
             <div>
-                <h1 className="text-2xl font-semibold">Billing</h1>
+                <h1 className="text-2xl font-semibold">{t('Billing')}</h1>
             </div>
 
             <TenantLeaseContext
@@ -129,11 +131,12 @@ export default function Payments({
                 <aside className="order-1 space-y-3 lg:sticky lg:top-20 lg:order-2 lg:self-start">
                     <div>
                         <h2 className="text-lg font-semibold">
-                            Account summary
+                            {t('Account summary')}
                         </h2>
                         <p className="text-sm text-muted-foreground">
-                            A quick view of what you owe and what is being
-                            verified.
+                            {t(
+                                'A quick view of what you owe and what is being verified.',
+                            )}
                         </p>
                     </div>
                     <AccountSummary
@@ -146,18 +149,20 @@ export default function Payments({
                     <section className="space-y-3">
                         <div>
                             <h2 className="text-lg font-semibold">
-                                Action required
+                                {t('Action required')}
                             </h2>
                             <p className="text-sm text-muted-foreground">
-                                Pay an invoice and we will verify your
-                                submission.
+                                {t(
+                                    'Pay an invoice and we will verify your submission.',
+                                )}
                             </p>
                         </div>
 
                         {outstandingSummary.count === 0 ? (
                             <p className="rounded-lg border p-4 text-sm text-muted-foreground">
-                                You’re all caught up. There are no invoices
-                                requiring payment.
+                                {t(
+                                    'You’re all caught up. There are no invoices requiring payment.',
+                                )}
                             </p>
                         ) : (
                             <>
@@ -179,8 +184,8 @@ export default function Payments({
                                         onClick={loadMore}
                                     >
                                         {loadingMore
-                                            ? 'Loading...'
-                                            : 'Load more'}
+                                            ? t('Loading...')
+                                            : t('Load more')}
                                     </Button>
                                 )}
                             </>
@@ -191,11 +196,12 @@ export default function Payments({
                         <section className="space-y-3">
                             <div>
                                 <h2 className="text-lg font-semibold">
-                                    In progress
+                                    {t('In progress')}
                                 </h2>
                                 <p className="text-sm text-muted-foreground">
-                                    Submitted payments are reviewed before they
-                                    are applied to your invoice.
+                                    {t(
+                                        'Submitted payments are reviewed before they are applied to your invoice.',
+                                    )}
                                 </p>
                             </div>
                             <div className="divide-y rounded-lg border">
@@ -213,22 +219,25 @@ export default function Payments({
                     <section className="space-y-3">
                         <div>
                             <h2 className="text-lg font-semibold">
-                                Your records
+                                {t('Your records')}
                             </h2>
                             <p className="text-sm text-muted-foreground">
-                                Completed invoices and finalized payments.
+                                {t(
+                                    'Completed invoices and finalized payments.',
+                                )}
                             </p>
                         </div>
 
                         <details className="group rounded-lg border">
                             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 font-medium [&::-webkit-details-marker]:hidden">
-                                Invoice history ({historicalInvoiceCount})
+                                {t('Invoice history')} ({historicalInvoiceCount}
+                                )
                                 <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
                             </summary>
                             <div className="border-t">
                                 {historicalInvoices.length === 0 ? (
                                     <p className="p-4 text-sm text-muted-foreground">
-                                        No completed invoices yet.
+                                        {t('No completed invoices yet.')}
                                     </p>
                                 ) : (
                                     <div className="divide-y">
@@ -251,7 +260,7 @@ export default function Payments({
                                                 },
                                             })}
                                         >
-                                            View all invoices
+                                            {t('View all invoices')}
                                         </Link>
                                     </Button>
                                 </div>
@@ -260,13 +269,13 @@ export default function Payments({
 
                         <details className="group rounded-lg border">
                             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 font-medium [&::-webkit-details-marker]:hidden">
-                                Payment history ({finalizedPaymentCount})
+                                {t('Payment history')} ({finalizedPaymentCount})
                                 <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
                             </summary>
                             <div className="border-t">
                                 {finalizedPayments.length === 0 ? (
                                     <p className="p-4 text-sm text-muted-foreground">
-                                        No finalized payments yet.
+                                        {t('No finalized payments yet.')}
                                     </p>
                                 ) : (
                                     <div className="divide-y">
@@ -288,7 +297,7 @@ export default function Payments({
                                                 },
                                             })}
                                         >
-                                            View all payments
+                                            {t('View all payments')}
                                         </Link>
                                     </Button>
                                 </div>
@@ -318,7 +327,7 @@ function AccountSummary({
     lease,
 }: {
     outstandingSummary: {
-        amount: string;
+        amounts: MoneyAggregate[];
         count: number;
         next_due_date: string | null;
         pending_payment_count: number;
@@ -332,26 +341,30 @@ function AccountSummary({
     return (
         <Card className="gap-4 py-5">
             <CardContent className="grid gap-4 px-5">
-                <SummaryItem label="Outstanding balance">
+                <SummaryItem label={t('Outstanding balance')}>
                     <span className="font-semibold tabular-nums">
-                        {formatPrice(outstandingSummary.amount)}
+                        {outstandingSummary.amounts
+                            .map((amount) =>
+                                formatPrice(amount.amount, amount.currency),
+                            )
+                            .join(' · ') || formatPrice('0')}
                     </span>
                 </SummaryItem>
-                <SummaryItem label="Payable invoices">
+                <SummaryItem label={t('Payable invoices')}>
                     {outstandingSummary.count}
                 </SummaryItem>
                 {currentLeaseName && (
-                    <SummaryItem label="Current lease">
+                    <SummaryItem label={t('Current lease')}>
                         <span className="text-right">{currentLeaseName}</span>
                     </SummaryItem>
                 )}
                 {outstandingSummary.next_due_date && (
-                    <SummaryItem label="Next due date">
+                    <SummaryItem label={t('Next due date')}>
                         {formatDate(outstandingSummary.next_due_date)}
                     </SummaryItem>
                 )}
                 {outstandingSummary.pending_payment_count > 0 && (
-                    <SummaryItem label="Pending verification">
+                    <SummaryItem label={t('Pending verification')}>
                         {outstandingSummary.pending_payment_count}
                     </SummaryItem>
                 )}
@@ -387,18 +400,18 @@ function PaymentRow({
 
     return (
         <BillingQueueItem
-            title={`${paymentMethodLabel} payment`}
+            title={`${paymentMethodLabel} ${t('payment')}`}
             statusDomain="tenant_payment"
             status={payment.status}
-            amount={formatPrice(payment.amount)}
+            amount={formatPrice(payment.amount, payment.invoice.currency)}
             description={
                 <>
-                    Paid on {formatDate(payment.payment_date)} for{' '}
-                    {formatPeriod(payment.invoice.period_start)} rent
+                    {t('Paid on')} {formatDate(payment.payment_date)} {t('for')}{' '}
+                    {formatPeriod(payment.invoice.period_start)} {t('rent')}
                     {payment.invoice.reference && (
                         <span className="hidden sm:inline">
                             {' · '}
-                            Invoice {payment.invoice.reference}
+                            {t('Invoice')} {payment.invoice.reference}
                         </span>
                     )}
                 </>
@@ -416,7 +429,8 @@ function PaymentRow({
                         asChild
                     >
                         <Link href={showInvoice(payment.invoice)}>
-                            View invoice <ChevronRight className="sm:hidden" />
+                            {t('View invoice')}{' '}
+                            <ChevronRight className="sm:hidden" />
                         </Link>
                     </Button>
                 ) : undefined

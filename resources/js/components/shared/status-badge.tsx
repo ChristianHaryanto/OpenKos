@@ -1,4 +1,5 @@
 import { Badge } from '@/components/ui/badge';
+import { t } from '@/lib/i18n';
 
 type StatusConfig = {
     label: string;
@@ -196,7 +197,42 @@ const STATUS_CONFIGS: Record<string, Record<string, StatusConfig>> = {
             className:
                 'bg-surface-green/70 text-surface-green-foreground border-surface-green-border/80',
         },
+        inactive: { label: 'Inactive', variant: 'secondary' },
         archived: { label: 'Archived', variant: 'secondary' },
+    },
+    inspection: {
+        draft: { label: 'Draft', variant: 'outline' },
+        completed: {
+            label: 'Completed',
+            className:
+                'bg-surface-green/70 text-surface-green-foreground border-surface-green-border/80',
+        },
+    },
+    inspection_condition: {
+        good: {
+            label: 'Good',
+            className:
+                'bg-surface-green/70 text-surface-green-foreground border-surface-green-border/80',
+        },
+        fair: {
+            label: 'Fair',
+            className:
+                'bg-surface-amber/70 text-surface-amber-foreground border-surface-amber-border/80',
+        },
+        damaged: {
+            label: 'Damaged',
+            className:
+                'bg-surface-red/70 text-surface-red-foreground border-surface-red-border/80',
+        },
+        not_applicable: { label: 'Not applicable', variant: 'secondary' },
+    },
+    expense: {
+        active: {
+            label: 'Active',
+            className:
+                'bg-surface-green/70 text-surface-green-foreground border-surface-green-border/80',
+        },
+        voided: { label: 'Voided', variant: 'secondary' },
     },
     role: {
         active: {
@@ -271,16 +307,16 @@ export function StatusBadge({
     const config = STATUS_CONFIGS[domain]?.[val];
 
     if (!config) {
-        return <Badge variant="outline">{val}</Badge>;
+        return <Badge variant="outline">{t(val)}</Badge>;
     }
 
     if (config.variant) {
         return (
             <Badge variant={config.variant} className={config.className}>
-                {config.label}
+                {t(config.label)}
             </Badge>
         );
     }
 
-    return <Badge className={config.className}>{config.label}</Badge>;
+    return <Badge className={config.className}>{t(config.label)}</Badge>;
 }

@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Actions\Maintenance\BlockUnit;
 use App\Actions\Maintenance\ResolveTicket;
 use App\Business\Maintenance\TransitionValidator;
-use App\Enums\LeaseStatus;
 use App\Enums\MaintenanceStatus;
 use App\Events\Maintenance\MaintenanceResolved;
 use App\Events\Maintenance\MaintenanceTicketCreated;
@@ -18,6 +17,7 @@ use App\Models\MaintenanceTicket;
 use App\Models\Property;
 use App\Models\Unit;
 use App\Models\User;
+use App\Services\ReferenceAllocationRetry;
 use App\Tables\Column;
 use App\Tables\Filter;
 use App\Tables\Table;
@@ -25,6 +25,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -34,6 +35,7 @@ class MaintenanceTicketController extends Controller
         private TransitionValidator $transitionValidator,
         private BlockUnit $blockUnit,
         private ResolveTicket $resolveTicket,
+        private ReferenceAllocationRetry $referenceAllocationRetry,
     ) {}
 
     public function show(MaintenanceTicket $ticket): Response
@@ -101,10 +103,10 @@ class MaintenanceTicketController extends Controller
             ->orderBy('name')
             ->get(['id', 'name']);
 
-        $units = Unit::query()
+        $unitQuery = Unit::query()
             ->select(['id', 'slug', 'name', 'property_id', 'status'])
-            ->withCount(['leases as active_lease_count' => fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)])
-            ->with(['leases' => fn ($q) => $q->where('status', LeaseStatus::Active->value)->with('tenants:id,name')])
+            ->withCount(['leases as active_lease_count' => fn (Builder $q) => $q->active()])
+            ->with(['leases' => fn ($q) => $q->active()->with('tenants:id,name')])
             ->addSelect([
                 'has_maintenance_transfer' => LeaseUnitHistory::query()
                     ->selectRaw('1')
@@ -116,7 +118,11 @@ class MaintenanceTicketController extends Controller
                 'property.users',
                 fn (Builder $q) => $q->whereKey($request->user()->id),
             ))
-            ->orderBy('name')
+            ->orderBy('name');
+
+        $units = (clone $unitQuery)->get();
+        $transferUnits = (clone $unitQuery)
+            ->whereHas('property', fn (Builder $q) => $q->supportsUnitInventory())
             ->get();
 
         $transfers = LeaseUnitHistory::query()
@@ -137,6 +143,7 @@ class MaintenanceTicketController extends Controller
             'property_id' => $request->query('property_id'),
             'properties' => $properties,
             'units' => $units,
+            'transferUnits' => $transferUnits,
             'users' => User::query()
                 ->with('roles')
                 ->orderBy('name')
@@ -162,29 +169,25 @@ class MaintenanceTicketController extends Controller
         $moveToUnitId = $data['move_tenant_to_unit_id'] ?? null;
         unset($data['block_unit'], $data['move_tenant_to_unit_id']);
 
-        $ticket = MaintenanceTicket::create($data);
+        $result = $this->referenceAllocationRetry->run(function () use ($data, $blockUnit, $moveToUnitId): array {
+            $ticket = MaintenanceTicket::create($data);
+            $statusChanges = [];
 
-        MaintenanceTicketCreated::dispatch($ticket, actorId: Auth::id());
-
-        if ($blockUnit && ! empty($data['unit_id'])) {
-            $unit = Unit::findOrFail($data['unit_id']);
-            $oldStatus = $unit->status;
-
-            $targetUnit = $moveToUnitId ? Unit::find($moveToUnitId) : null;
-            $oldTargetStatus = $targetUnit?->status;
-
-            $this->blockUnit->execute($data['unit_id'], $moveToUnitId);
-
-            $unit->refresh();
-            if ($oldStatus !== $unit->status) {
-                UnitStatusChanged::dispatch($unit, $oldStatus, $unit->status, actorId: Auth::id());
+            if ($blockUnit && ! empty($data['unit_id'])) {
+                $statusChanges = $this->blockUnit->execute($data['unit_id'], $moveToUnitId);
             }
 
-            if ($targetUnit) {
-                $targetUnit->refresh();
-                if ($oldTargetStatus !== $targetUnit->status) {
-                    UnitStatusChanged::dispatch($targetUnit, $oldTargetStatus, $targetUnit->status, actorId: Auth::id());
-                }
+            return [
+                'ticket' => $ticket,
+                'status_changes' => $statusChanges,
+            ];
+        }, 'maintenance_tickets');
+
+        MaintenanceTicketCreated::dispatch($result['ticket'], actorId: Auth::id());
+
+        foreach ($result['status_changes'] as $change) {
+            if ($change['from'] !== $change['unit']->status) {
+                UnitStatusChanged::dispatch($change['unit'], $change['from'], $change['unit']->status, actorId: Auth::id());
             }
         }
 
@@ -198,60 +201,54 @@ class MaintenanceTicketController extends Controller
         $this->authorize('update', $ticket);
 
         $validated = $request->validated();
-
-        if (isset($validated['status'])) {
-            $newStatus = MaintenanceStatus::from($validated['status']);
-            $this->transitionValidator->validate($ticket->status, $newStatus);
-
-            if ($newStatus === MaintenanceStatus::Resolved) {
-                $validated['resolved_at'] ??= now();
-            }
-
-            $statusChangedToResolved = $newStatus === MaintenanceStatus::Resolved;
-        }
-
         $restoreUnit = ! empty($validated['restore_unit']);
         $moveBack = ! empty($validated['move_back']);
         unset($validated['restore_unit'], $validated['move_back']);
 
-        $ticket->update($validated);
+        $restoreResult = DB::transaction(function () use ($ticket, $validated, $restoreUnit, $moveBack): array {
+            $ticket = MaintenanceTicket::query()->lockForUpdate()->findOrFail($ticket->id);
+            $statusChangedToResolved = false;
 
-        if ($ticket->wasChanged()) {
-            MaintenanceTicketUpdated::dispatch($ticket, actorId: Auth::id());
-        }
+            if (isset($validated['status'])) {
+                $newStatus = MaintenanceStatus::from($validated['status']);
+                $this->transitionValidator->validate($ticket->status, $newStatus);
 
-        if (($statusChangedToResolved ?? false)) {
-            MaintenanceResolved::dispatch($ticket, actorId: Auth::id());
-        }
-
-        if ($restoreUnit && $ticket->unit_id) {
-            $unit = Unit::findOrFail($ticket->unit_id);
-            $oldStatus = $unit->status;
-
-            $transfer = LeaseUnitHistory::query()
-                ->where('from_unit_id', $ticket->unit_id)
-                ->where('reason', 'maintenance')
-                ->orderBy('effective_date', 'desc')
-                ->first();
-            $targetUnit = $transfer ? Unit::find($transfer->to_unit_id) : null;
-            $oldTargetStatus = $targetUnit?->status;
-
-            $this->resolveTicket->execute($ticket, $moveBack);
-
-            $unit->refresh();
-            if ($oldStatus !== $unit->status) {
-                UnitStatusChanged::dispatch($unit, $oldStatus, $unit->status, actorId: Auth::id());
-            }
-
-            if ($targetUnit) {
-                $targetUnit->refresh();
-                if ($oldTargetStatus !== $targetUnit->status) {
-                    UnitStatusChanged::dispatch($targetUnit, $oldTargetStatus, $targetUnit->status, actorId: Auth::id());
+                if ($newStatus === MaintenanceStatus::Resolved) {
+                    $validated['resolved_at'] ??= now();
+                    $statusChangedToResolved = true;
                 }
             }
 
-            $unitName = $unit->name ?? '';
-            Inertia::flash('toast', ['type' => 'success', 'message' => __('Ticket updated. Unit :name restored.', ['name' => $unitName])]);
+            $ticket->update($validated);
+
+            if ($ticket->wasChanged()) {
+                MaintenanceTicketUpdated::dispatch($ticket, actorId: Auth::id());
+            }
+
+            if ($statusChangedToResolved) {
+                MaintenanceResolved::dispatch($ticket, actorId: Auth::id());
+            }
+
+            $statusChanges = [];
+            $didRestore = $restoreUnit && $ticket->unit_id;
+            if ($didRestore) {
+                $statusChanges = $this->resolveTicket->execute($ticket, $moveBack);
+
+                foreach ($statusChanges as $change) {
+                    if ($change['from'] !== $change['unit']->status) {
+                        UnitStatusChanged::dispatch($change['unit'], $change['from'], $change['unit']->status, actorId: Auth::id());
+                    }
+                }
+            }
+
+            return [
+                'did_restore' => (bool) $didRestore,
+                'unit_name' => $didRestore ? ($statusChanges[$ticket->unit_id]['unit']->name ?? '') : '',
+            ];
+        });
+
+        if ($restoreResult['did_restore']) {
+            Inertia::flash('toast', ['type' => 'success', 'message' => __('Ticket updated. Unit :name restored.', ['name' => $restoreResult['unit_name']])]);
 
             return back();
         }

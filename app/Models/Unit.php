@@ -3,7 +3,9 @@
 namespace App\Models;
 
 use App\Concerns\Auditable;
+use App\Concerns\SerializesDatesWithTimezone;
 use App\Enums\UnitStatus;
+use App\Services\Payments\MoneyConverter;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -11,11 +13,13 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 #[Fillable([
     'property_id',
+    'unit_type_id',
     'name',
     'slug',
     'floor',
@@ -27,7 +31,7 @@ use Illuminate\Support\Str;
 ])]
 class Unit extends Model
 {
-    use Auditable, HasFactory, SoftDeletes;
+    use Auditable, HasFactory, SerializesDatesWithTimezone, SoftDeletes;
 
     protected function casts(): array
     {
@@ -67,6 +71,11 @@ class Unit extends Model
         return $this->belongsTo(Property::class);
     }
 
+    public function unitType(): BelongsTo
+    {
+        return $this->belongsTo(UnitType::class);
+    }
+
     public function leases(): HasMany
     {
         return $this->hasMany(Lease::class);
@@ -75,6 +84,16 @@ class Unit extends Model
     public function rates(): HasMany
     {
         return $this->hasMany(UnitRate::class);
+    }
+
+    public function utilityMeters(): HasMany
+    {
+        return $this->hasMany(UtilityMeter::class);
+    }
+
+    public function meters(): HasMany
+    {
+        return $this->utilityMeters();
     }
 
     public function activeRates(): HasMany
@@ -94,13 +113,40 @@ class Unit extends Model
             ->orderBy('id');
     }
 
+    public function defaultActiveRate(?string $currency = null): ?UnitRate
+    {
+        $preferredCurrency = app(MoneyConverter::class)->normalizeCurrency($currency);
+        $rates = $this->activeRates()->get();
+
+        return $rates->first(fn (UnitRate $rate): bool => $rate->currency === $preferredCurrency)
+            ?? $rates->first();
+    }
+
     public function scopeAvailableForAssignment(Builder $query): void
     {
         $query->whereNull('deleted_at')
             ->whereNotIn('status', [UnitStatus::Maintenance->value, UnitStatus::Unavailable->value])
+            ->whereDoesntHave('property', fn (Builder $q) => $q->whereHas('activeWholePropertyLeases'))
             ->where(function (Builder $q) {
-                $q->whereDoesntHave('leases', fn (Builder $q) => $q->where('status', 'active'))
-                    ->orWhereRaw('capacity > (SELECT COALESCE(COUNT(*), 0) FROM lease_tenant WHERE lease_id IN (SELECT id FROM leases WHERE unit_id = units.id AND status = \'active\'))');
+                $q->whereDoesntHave('leases', fn (Builder $q) => $q->active())
+                    ->orWhere('capacity', '>', function (QueryBuilder $q): void {
+                        $q->from('lease_tenant')
+                            ->selectRaw('COALESCE(COUNT(*), 0)')
+                            ->whereIn('lease_id', Lease::query()
+                                ->active()
+                                ->whereColumn('unit_id', 'units.id')
+                                ->select('id'));
+                    });
+            });
+    }
+
+    public function scopeEligibleForPublicOffering(Builder $query): void
+    {
+        $query->whereNotIn('status', [UnitStatus::Maintenance->value, UnitStatus::Unavailable->value])
+            ->whereDoesntHave('property', fn (Builder $q) => $q->whereHas('activeWholePropertyLeases'))
+            ->where(function (Builder $query): void {
+                $query->whereHas('rates', fn (Builder $query) => $query->where('is_active', true))
+                    ->orWhereHas('unitType', fn (Builder $query) => $query->whereHas('rates', fn (Builder $query) => $query->where('is_active', true)));
             });
     }
 
@@ -109,17 +155,47 @@ class Unit extends Model
         $query->addSelect([
             'occupied_count' => DB::table('lease_tenant')
                 ->selectRaw('COALESCE(COUNT(*), 0)')
-                ->whereIn('lease_id', function (\Illuminate\Database\Query\Builder $q) {
-                    $q->select('id')
-                        ->from('leases')
-                        ->whereColumn('unit_id', 'units.id')
-                        ->where('status', 'active');
-                }),
+                ->whereIn('lease_id', Lease::query()
+                    ->active()
+                    ->whereColumn('unit_id', 'units.id')
+                    ->select('id')),
         ]);
+    }
+
+    public function scopeStatusFilter(Builder $query, string $status): void
+    {
+        if ($status === 'archived') {
+            $query->whereNotNull('units.deleted_at');
+
+            return;
+        }
+
+        if (in_array($status, UnitStatus::values(), true)) {
+            $query->whereNull('units.deleted_at')->where('units.status', $status);
+
+            return;
+        }
+
+        $query->whereRaw('1 = 0');
+    }
+
+    public function scopeListSearch(Builder $query, string $search): void
+    {
+        $search = mb_strtolower($search);
+
+        $query->where(function (Builder $query) use ($search): void {
+            $query->whereRaw('lower(units.name) like ?', ["%{$search}%"])
+                ->orWhereRaw('lower(units.floor) like ?', ["%{$search}%"]);
+        });
     }
 
     public function maintenanceTickets(): HasMany
     {
         return $this->hasMany(MaintenanceTicket::class);
+    }
+
+    public function inspections(): HasMany
+    {
+        return $this->hasMany(Inspection::class);
     }
 }

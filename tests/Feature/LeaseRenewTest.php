@@ -1,18 +1,23 @@
 <?php
 
+use App\Actions\Leases\RenewLease;
 use App\Data\Lease\RenewLeaseData;
 use App\Enums\DepositHandling;
 use App\Enums\InvoiceStatus;
 use App\Enums\LeaseStatus;
+use App\Enums\PropertyRentalMode;
+use App\Enums\UnitStatus;
 use App\Models\Invoice;
 use App\Models\Lease;
 use App\Models\Property;
+use App\Models\PropertyRate;
 use App\Models\Tenant;
 use App\Models\Unit;
 use App\Models\User;
 use Carbon\Carbon;
 use Database\Seeders\RegionAndCitySeeder;
 use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Support\Facades\DB;
 
 uses()->beforeEach(function () {
     $this->seed(RoleAndPermissionSeeder::class);
@@ -70,6 +75,25 @@ describe('authorization', function () {
                 'confirmed_outstanding' => true,
             ])
             ->assertRedirect(route('leases.index'));
+    });
+
+    it('rejects renewal of a legacy unit lease after its property becomes whole property', function () {
+        [$property, , $lease] = createRenewableLease();
+        $property->update(['rental_mode' => PropertyRentalMode::WholeProperty]);
+        $user = User::factory()->owner()->create();
+
+        $this->actingAs($user)
+            ->post(route('leases.renew', $lease), [
+                'rent_amount' => 1_200_000,
+                'extension_value' => 12,
+                'extension_unit' => 'months',
+                'deposit_handling' => 'carry_forward',
+                'confirmed_outstanding' => true,
+            ])
+            ->assertNotFound();
+
+        expect(Lease::query()->count())->toBe(1)
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active);
     });
 
     it('allows admin with property access to renew', function () {
@@ -177,6 +201,177 @@ describe('eligibility', function () {
 });
 
 describe('renewal', function () {
+    it('rejects unit renewal when a whole-property lease appeared', function () {
+        [$property, $unit, $lease] = createRenewableLease();
+        $property->update(['rental_mode' => PropertyRentalMode::Hybrid]);
+
+        Lease::factory()->wholeProperty($property)->create();
+
+        $result = app(RenewLease::class)->execute($lease->fresh(), new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->error)->toContain('Unit already has an active lease.')
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active)
+            ->and(Lease::query()->where('previous_lease_id', $lease->id)->exists())->toBeFalse();
+    });
+
+    it('allows unit renewal when another unit on the property is active', function () {
+        [$property, $unit, $lease] = createRenewableLease();
+        $property->update(['rental_mode' => PropertyRentalMode::Hybrid]);
+        $otherUnit = Unit::factory()->create(['property_id' => $property->id]);
+        Lease::factory()->create(['unit_id' => $otherUnit->id]);
+
+        $result = app(RenewLease::class)->execute($lease->fresh(), new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->succeeded())->toBeTrue()
+            ->and($result->newLease->unit_id)->toBe($unit->id)
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Renewed);
+    });
+
+    it('renews a whole-property lease with property conflict protection', function () {
+        $property = Property::factory()->create(['rental_mode' => PropertyRentalMode::WholeProperty]);
+        $rate = PropertyRate::factory()->create(['property_id' => $property->id]);
+        $tenant = Tenant::factory()->create();
+        $lease = Lease::factory()->wholeProperty($property)->create([
+            'primary_tenant_id' => $tenant->id,
+            'property_rate_id' => $rate->id,
+            'start_date' => '2026-01-01',
+            'end_date' => '2026-06-30',
+            'rent_amount' => 1_000_000,
+        ]);
+
+        $result = app(RenewLease::class)->execute($lease, new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->succeeded())->toBeTrue()
+            ->and($result->newLease->property_id)->toBe($property->id)
+            ->and($result->newLease->unit_id)->toBeNull()
+            ->and($result->newLease->property_rate_id)->toBe($rate->id)
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Renewed);
+    });
+
+    it('rejects whole-property renewal when another property lease appeared', function () {
+        $property = Property::factory()->create(['rental_mode' => PropertyRentalMode::Hybrid]);
+        $rate = PropertyRate::factory()->create(['property_id' => $property->id]);
+        $tenant = Tenant::factory()->create();
+        $lease = Lease::factory()->wholeProperty($property)->create([
+            'primary_tenant_id' => $tenant->id,
+            'property_rate_id' => $rate->id,
+            'start_date' => '2026-01-01',
+            'end_date' => '2026-06-30',
+            'rent_amount' => 1_000_000,
+        ]);
+
+        $unit = Unit::factory()->create(['property_id' => $property->id]);
+        Lease::factory()->create(['unit_id' => $unit->id]);
+
+        $result = app(RenewLease::class)->execute($lease->fresh(), new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->error)->toContain('another active lease')
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active);
+    });
+
+    it('rechecks a stale lease instance before renewal', function () {
+        [, , $lease] = createRenewableLease();
+        $staleLease = $lease->fresh();
+
+        DB::table('leases')->where('id', $lease->id)->update([
+            'status' => LeaseStatus::Terminated->value,
+            'termination_date' => '2026-08-21',
+        ]);
+
+        $result = app(RenewLease::class)->execute($staleLease, new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Terminated)
+            ->and(Lease::query()->where('previous_lease_id', $lease->id)->exists())->toBeFalse();
+    });
+
+    it('rejects a renewal end date based on a stale lease end date', function () {
+        [, , $lease] = createRenewableLease();
+        $staleLease = $lease->fresh();
+
+        DB::table('leases')->where('id', $lease->id)->update([
+            'end_date' => '2027-12-31',
+        ]);
+
+        $result = app(RenewLease::class)->execute($staleLease, new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->error)->toContain('end date')
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active)
+            ->and(Lease::query()->where('previous_lease_id', $lease->id)->exists())->toBeFalse();
+    });
+
+    it('rejects renewal for blocked units', function (UnitStatus $status) {
+        [, $unit, $lease] = createRenewableLease();
+        $unit->update(['status' => $status]);
+
+        $result = app(RenewLease::class)->execute($lease->fresh(), new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->error)->toContain('not available')
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active)
+            ->and(Lease::query()->where('previous_lease_id', $lease->id)->exists())->toBeFalse();
+    })->with([
+        'maintenance' => UnitStatus::Maintenance,
+        'unavailable' => UnitStatus::Unavailable,
+    ]);
+
+    it('rejects invalid legacy deposits before creating a renewed lease', function () {
+        [, , $lease] = createRenewableLease([
+            'deposit_amount' => '1.50',
+        ]);
+        DB::table('leases')->whereKey($lease->id)->update(['currency' => null]);
+
+        $result = app(RenewLease::class)->execute($lease->fresh(), new RenewLeaseData(
+            endDate: Carbon::parse('2027-06-30')->toImmutable(),
+            rentAmount: '1000000',
+            depositHandling: DepositHandling::CarryForward,
+            confirmedOutstanding: true,
+        ));
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->error)->toContain('invalid for its currency')
+            ->and($lease->fresh()->status)->toBe(LeaseStatus::Active)
+            ->and(Lease::query()->where('previous_lease_id', $lease->id)->exists())->toBeFalse();
+    });
+
     it('creates a new lease with updated rent and extension', function () {
         [, , $lease] = createRenewableLease();
         $user = User::factory()->owner()->create();
@@ -200,7 +395,7 @@ describe('renewal', function () {
         expect($newLease)->not->toBeNull();
         expect($newLease->previous_lease_id)->toBe($lease->id);
         expect($newLease->status)->toBe(LeaseStatus::Active);
-        expect($newLease->rent_amount)->toBe('1500000.00');
+        expect($newLease->rent_amount)->toBe('1500000.000');
         expect($newLease->start_date->format('Y-m-d'))->toBe('2026-07-01');
         expect($newLease->end_date->format('Y-m-d'))->toBe('2027-06-30');
         expect($newLease->unit_id)->toBe($lease->unit_id);
@@ -259,7 +454,7 @@ describe('renewal', function () {
 
         $newLease = $lease->fresh()->renewedLease;
 
-        expect($newLease->deposit_amount)->toBe('500000.00');
+        expect($newLease->deposit_amount)->toBe('500000.000');
         expect($newLease->deposit_paid_at)->not->toBeNull();
     });
 
@@ -526,7 +721,7 @@ describe('RenewLeaseData', function () {
             confirmedOutstanding: true,
         );
 
-        expect($data->rentAmount)->toBe(1_200_000);
+        expect($data->rentAmount)->toBe('1200000');
         expect($data->confirmedOutstanding)->toBeTrue();
     });
 });

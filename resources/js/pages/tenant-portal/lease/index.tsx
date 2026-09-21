@@ -1,6 +1,7 @@
 import { Head, Link } from '@inertiajs/react';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { formatDate, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import { show } from '@/routes/portal/lease';
 import type { Lease } from '@/types';
 
@@ -13,25 +14,25 @@ export default function LeaseIndex({
 }) {
     return (
         <>
-            <Head title="Leases" />
+            <Head title={t('Leases')} />
 
             <div className="flex flex-1 flex-col gap-6 p-4">
                 <div>
-                    <h1 className="text-2xl font-semibold">Leases</h1>
+                    <h1 className="text-2xl font-semibold">{t('Leases')}</h1>
                     <p className="text-sm text-muted-foreground">
-                        Current and previous stays
+                        {t('Current and previous stays')}
                     </p>
                 </div>
 
                 <LeaseSection
-                    title="Current stay"
+                    title={t('Current stay')}
                     leases={currentLeases}
-                    emptyMessage="You do not have an active lease."
+                    emptyMessage={t('You do not have an active lease.')}
                 />
                 <LeaseSection
-                    title="Previous stays"
+                    title={t('Previous stays')}
                     leases={previousLeases}
-                    emptyMessage="No previous stays."
+                    emptyMessage={t('No previous stays.')}
                 />
             </div>
         </>
@@ -65,16 +66,16 @@ function LeaseSection({
                             <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div>
                                     <p className="font-medium">
-                                        {lease.unit?.name ?? 'Unit'}
-                                        {lease.unit?.property
-                                            ? ` · ${lease.unit.property.name}`
-                                            : ''}
+                                        {lease.target_type === 'whole_property'
+                                            ? (lease.property?.name ??
+                                              t('Entire property'))
+                                            : `${lease.unit?.name ?? t('Unit')} · ${lease.property?.name ?? ''}`}
                                     </p>
                                     <p className="text-sm text-muted-foreground">
                                         {formatDate(lease.start_date)} –{' '}
                                         {lease.end_date
                                             ? formatDate(lease.end_date)
-                                            : 'Ongoing'}
+                                            : t('Ongoing')}
                                     </p>
                                 </div>
                                 <StatusBadge
@@ -84,7 +85,7 @@ function LeaseSection({
                             </div>
                             <p className="mt-3 text-sm tabular-nums">
                                 {lease.rent_amount
-                                    ? `${formatPrice(lease.rent_amount)} ${lease.billing_label}`
+                                    ? `${formatPrice(lease.rent_amount, lease.currency)} ${lease.billing_label}`
                                     : '—'}
                             </p>
                         </Link>

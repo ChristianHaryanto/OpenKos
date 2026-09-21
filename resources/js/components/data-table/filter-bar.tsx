@@ -16,6 +16,7 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from '@/components/ui/popover';
+import { t } from '@/lib/i18n';
 import type { TableFilterMeta } from '@/types';
 
 type FilterBarProps = {
@@ -24,7 +25,14 @@ type FilterBarProps = {
     activeFilterCount: number;
     onToggleOption: (key: string, value: string) => void;
     onClearAll: () => void;
-    searchInput: ReactNode;
+    searchInput?: ReactNode;
+    alwaysOpen?: boolean;
+    additionalFilters?: ReactNode;
+    additionalFilterChips?: Array<{
+        key: string;
+        display: string;
+        onRemove: () => void;
+    }>;
 };
 
 function optLabel(filter: TableFilterMeta, value: string): string | undefined {
@@ -73,7 +81,7 @@ function SelectFilter({
                     className="w-full justify-between bg-card font-normal md:w-48"
                 >
                     <span className="truncate">
-                        {selectedLabels || `All ${filter.label.toLowerCase()}`}
+                        {selectedLabels || `${t('All')} ${t(filter.label)}`}
                     </span>
                     <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
                 </Button>
@@ -81,21 +89,21 @@ function SelectFilter({
             <PopoverContent className="w-56 bg-card p-0" align="start">
                 <Command>
                     <CommandInput
-                        placeholder={`Search ${filter.label.toLowerCase()}...`}
+                        placeholder={`${t('Search')} ${t(filter.label)}...`}
                     />
                     <CommandList>
-                        <CommandEmpty>No options found.</CommandEmpty>
+                        <CommandEmpty>{t('No options found.')}</CommandEmpty>
                         <CommandGroup>
                             {filter.options.map((opt) => {
                                 const optValue =
                                     typeof opt === 'string' ? opt : opt.value;
-                                const optLabel =
+                                const optionLabel =
                                     typeof opt === 'string' ? opt : opt.label;
 
                                 return (
                                     <CommandItem
                                         key={optValue}
-                                        value={optLabel}
+                                        value={optionLabel}
                                         onSelect={() => {
                                             onToggle(optValue);
                                         }}
@@ -107,7 +115,7 @@ function SelectFilter({
                                                     : 'opacity-0'
                                             }`}
                                         />
-                                        {optLabel}
+                                        {t(optionLabel)}
                                     </CommandItem>
                                 );
                             })}
@@ -126,6 +134,9 @@ export function FilterBar({
     onToggleOption,
     onClearAll,
     searchInput,
+    alwaysOpen = false,
+    additionalFilters,
+    additionalFilterChips = [],
 }: FilterBarProps) {
     const [open, setOpen] = useState(false);
 
@@ -137,14 +148,14 @@ export function FilterBar({
 
             return values.map((v) => ({
                 key: `${key}-${v}`,
-                filterKey: key,
-                value: v,
                 display: filter
-                    ? `${label}: ${optLabel(filter, v) ?? v}`
+                    ? `${t(label)}: ${t(optLabel(filter, v) ?? v)}`
                     : `${label}: ${v}`,
+                onRemove: () => onToggleOption(key, v),
             }));
         },
     );
+    filterChips.push(...additionalFilterChips);
 
     const selectedValues = (key: string): string[] =>
         activeFilters[key] ? activeFilters[key].split(',') : [];
@@ -152,40 +163,44 @@ export function FilterBar({
     return (
         <div>
             <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1">{searchInput}</div>
+                {searchInput && (
+                    <div className="min-w-0 flex-1">{searchInput}</div>
+                )}
 
-                <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                        variant={open ? 'default' : 'outline'}
-                        size="icon"
-                        className="relative shrink-0 bg-card"
-                        onClick={() => setOpen((v) => !v)}
-                        aria-label="Toggle filters"
-                    >
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="24"
-                            height="24"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            className="size-4"
+                {!alwaysOpen && (
+                    <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                            variant={open ? 'default' : 'outline'}
+                            size="icon"
+                            className="relative shrink-0 bg-card"
+                            onClick={() => setOpen((v) => !v)}
+                            aria-label={t('Toggle filters')}
                         >
-                            <path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z" />
-                        </svg>
-                        {activeFilterCount > 0 && (
-                            <span className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-[10px] font-medium text-primary-foreground">
-                                {activeFilterCount}
-                            </span>
-                        )}
-                    </Button>
-                </div>
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="24"
+                                height="24"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                className="size-4"
+                            >
+                                <path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z" />
+                            </svg>
+                            {activeFilterCount > 0 && (
+                                <span className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-xs font-medium text-primary-foreground">
+                                    {activeFilterCount}
+                                </span>
+                            )}
+                        </Button>
+                    </div>
+                )}
             </div>
 
-            {open && (
+            {(alwaysOpen || open) && (
                 <div className="mt-3 rounded-lg border bg-card p-4">
                     <div className="flex flex-wrap gap-3">
                         {filters.map((filter) => {
@@ -193,7 +208,7 @@ export function FilterBar({
                                 return (
                                     <div key={filter.key} className="min-w-0">
                                         <p className="mb-1.5 text-xs font-medium tracking-wider text-muted-foreground">
-                                            {filter.label}
+                                            {t(filter.label)}
                                         </p>
                                         <SelectFilter
                                             filter={filter}
@@ -215,7 +230,7 @@ export function FilterBar({
                                 return (
                                     <div key={filter.key} className="min-w-0">
                                         <p className="mb-1.5 text-xs font-medium tracking-wider text-muted-foreground">
-                                            {filter.label}
+                                            {t(filter.label)}
                                         </p>
                                         <Button
                                             variant={
@@ -233,8 +248,8 @@ export function FilterBar({
                                             {selectedValues(
                                                 filter.key,
                                             ).includes('1')
-                                                ? filter.label
-                                                : `Show ${filter.label}`}
+                                                ? t(filter.label)
+                                                : `${t('Show')} ${t(filter.label)}`}
                                         </Button>
                                     </div>
                                 );
@@ -242,6 +257,7 @@ export function FilterBar({
 
                             return null;
                         })}
+                        {additionalFilters}
                     </div>
                 </div>
             )}
@@ -258,13 +274,8 @@ export function FilterBar({
                                 {chip.display}
                                 <button
                                     type="button"
-                                    aria-label={`Remove ${chip.display} filter`}
-                                    onClick={() =>
-                                        onToggleOption(
-                                            chip.filterKey,
-                                            chip.value,
-                                        )
-                                    }
+                                    aria-label={`${t('Remove')} ${chip.display} ${t('filter')}`}
+                                    onClick={chip.onRemove}
                                     className="ml-0.5 hover:text-foreground"
                                 >
                                     <X className="size-3" />
@@ -278,7 +289,7 @@ export function FilterBar({
                         onClick={onClearAll}
                         className="shrink-0 text-xs"
                     >
-                        Clear all
+                        {t('Clear all')}
                     </Button>
                 </div>
             )}

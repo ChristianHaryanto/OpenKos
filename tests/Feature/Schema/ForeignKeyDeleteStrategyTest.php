@@ -12,9 +12,15 @@ use Illuminate\Support\Facades\DB;
 $expected = [
     // RESTRICT — historical business records, block parent force-delete
     'leases' => [
+        'property_id' => 'RESTRICT',
         'unit_id' => 'RESTRICT',
+        'unit_id,property_id' => 'RESTRICT',
         'primary_tenant_id' => 'SET NULL',
         'unit_rate_id' => 'SET NULL',
+        'unit_rate_id,unit_id' => 'RESTRICT',
+        'unit_type_rate_id' => 'SET NULL',
+        'property_rate_id' => 'RESTRICT',
+        'property_rate_id,property_id' => 'RESTRICT',
         'previous_lease_id' => 'SET NULL',
     ],
     'lease_tenant' => ['lease_id' => 'RESTRICT', 'tenant_id' => 'RESTRICT'],
@@ -25,7 +31,7 @@ $expected = [
         'transferred_by' => 'SET NULL',
     ],
     'reminder_logs' => ['lease_id' => 'RESTRICT'],
-    'tenant_documents' => ['tenant_id' => 'RESTRICT'],
+    'tenant_documents' => ['tenant_id' => 'RESTRICT', 'media_id' => 'RESTRICT'],
     'unit_rates' => ['unit_id' => 'RESTRICT'],
     'maintenance_tickets' => [
         'property_id' => 'RESTRICT',
@@ -33,14 +39,20 @@ $expected = [
         'assigned_to' => 'SET NULL',
         'created_by' => 'SET NULL',
     ],
-    'units' => ['property_id' => 'RESTRICT'],
+    'units' => [
+        'property_id' => 'RESTRICT',
+        'unit_type_id,property_id' => 'RESTRICT',
+    ],
+    'unit_types' => ['property_id' => 'RESTRICT'],
+    'amenity_property' => ['amenity_id' => 'CASCADE', 'property_id' => 'CASCADE'],
+    'amenity_unit_type' => ['amenity_id' => 'CASCADE', 'unit_type_id' => 'CASCADE'],
     'cities' => ['region_id' => 'RESTRICT'],
 
     // SET NULL — nullable audit/user references, record survives
     'payments' => ['invoice_id' => 'CASCADE', 'confirmed_by' => 'SET NULL', 'recorded_by' => 'SET NULL', 'verified_by' => 'SET NULL'],
     'payment_attempts' => ['invoice_id' => 'CASCADE', 'payment_id' => 'SET NULL'],
     'invoices' => ['lease_id' => 'CASCADE'],
-    'invoice_line_items' => ['invoice_id' => 'CASCADE'],
+    'invoice_line_items' => ['invoice_id' => 'CASCADE', 'utility_reading_id' => 'RESTRICT'],
     'properties' => ['region_id' => 'SET NULL', 'city_id' => 'SET NULL'],
     'tenants' => ['user_id' => 'SET NULL'],
 
@@ -50,7 +62,13 @@ $expected = [
     'model_has_roles' => ['role_id' => 'CASCADE'],
     'role_has_permissions' => ['permission_id' => 'CASCADE', 'role_id' => 'CASCADE'],
     'property_user' => ['user_id' => 'CASCADE', 'property_id' => 'CASCADE'],
-    'payment_proofs' => ['payment_id' => 'CASCADE'],
+    'payment_proofs' => ['payment_id' => 'CASCADE', 'media_id' => 'RESTRICT'],
+    'utility_meters' => ['unit_id' => 'RESTRICT'],
+    'utility_readings' => [
+        'utility_meter_id' => 'RESTRICT',
+        'previous_reading_id' => 'RESTRICT',
+        'corrects_reading_id' => 'RESTRICT',
+    ],
 ];
 
 $appTables = array_keys($expected);
@@ -83,8 +101,17 @@ function loadFkSqlite(array $tables): array
     $fk = [];
     foreach ($tables as $table) {
         $rows = DB::select("PRAGMA foreign_key_list({$table})");
+        $groups = [];
         foreach ($rows as $row) {
-            $fk[$table][$row->from] = strtoupper($row->on_delete);
+            $groups[$row->id][] = $row;
+        }
+
+        foreach ($groups as $group) {
+            usort($group, fn ($a, $b): int => $a->seq <=> $b->seq);
+            $key = count($group) === 1
+                ? $group[0]->from
+                : implode(',', array_map(fn ($row): string => $row->from, $group));
+            $fk[$table][$key] = strtoupper($group[0]->on_delete);
         }
     }
 
@@ -100,7 +127,9 @@ function loadFkPgsql(array $tables): array
     $rows = DB::select("
         SELECT
             tc.table_name,
+            tc.constraint_name,
             kcu.column_name,
+            kcu.ordinal_position,
             rc.delete_rule
         FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu
@@ -112,12 +141,22 @@ function loadFkPgsql(array $tables): array
         WHERE tc.constraint_type = 'FOREIGN KEY'
             AND tc.table_schema = 'public'
             AND tc.table_name IN ({$placeholders})
-        ORDER BY tc.table_name, kcu.column_name
+        ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
     ", $tables);
 
     $fk = [];
+    $groups = [];
     foreach ($rows as $row) {
-        $fk[$row->table_name][$row->column_name] = $row->delete_rule;
+        $groups[$row->table_name][$row->constraint_name][] = $row;
+    }
+
+    foreach ($groups as $table => $constraints) {
+        foreach ($constraints as $rows) {
+            $key = count($rows) === 1
+                ? $rows[0]->column_name
+                : implode(',', array_map(fn ($row): string => $row->column_name, $rows));
+            $fk[$table][$key] = $rows[0]->delete_rule;
+        }
     }
 
     return $fk;

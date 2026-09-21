@@ -1,7 +1,9 @@
 <?php
 
+use App\Enums\PropertyRentalMode;
 use App\Models\Lease;
 use App\Models\Property;
+use App\Models\Setting;
 use App\Models\Tenant;
 use App\Models\Unit;
 use App\Models\User;
@@ -175,6 +177,21 @@ describe('CRUD', function () {
         );
     });
 
+    it('applies multiple tenant status filters', function () {
+        $user = User::factory()->owner()->create();
+        Tenant::factory()->create(['is_active' => true]);
+        Tenant::factory()->inactive()->create();
+        $archived = Tenant::factory()->create();
+        $archived->delete();
+
+        $this->actingAs($user)
+            ->get(route('tenants.index', ['status' => 'active,inactive']))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('tenants.data', 2)
+            );
+    });
+
     it('filters archived tenants', function () {
         $user = User::factory()->owner()->create();
         Tenant::factory()->create();
@@ -293,6 +310,29 @@ describe('unit assignment authorization', function () {
             ])
             ->assertForbidden();
     });
+
+    it('rejects assigning a tenant to a unit in a whole-property property', function () {
+        $user = User::factory()->owner()->create();
+        $tenant = Tenant::factory()->create();
+        $property = Property::factory()->create([
+            'rental_mode' => PropertyRentalMode::WholeProperty,
+        ]);
+        $unit = Unit::factory()->for($property)->create();
+
+        $this->actingAs($user)
+            ->get(route('tenants.index'))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page->where('availableUnits', []));
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenant), [
+                'unit_id' => $unit->id,
+                'start_date' => '2026-06-01',
+            ])
+            ->assertNotFound();
+
+        expect(Lease::query()->exists())->toBeFalse();
+    });
 });
 
 describe('unit assignment pricing', function () {
@@ -325,5 +365,130 @@ describe('unit assignment pricing', function () {
         expect($lease->unit_rate_id)->toBe($rate->id)
             ->and((float) $lease->rent_amount)->toBe(1_750_000.0)
             ->and($lease->is_custom_price)->toBeFalse();
+    });
+
+    it('assigns a lease using the selected currency-specific rate', function () {
+        $user = User::factory()->owner()->create();
+        $tenant = Tenant::factory()->create();
+        $unit = Unit::factory()->withRate(1_750_000)->create();
+        $usdRate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenant), [
+                'unit_id' => $unit->id,
+                'unit_rate_id' => $usdRate->id,
+                'start_date' => '2026-06-01',
+            ])
+            ->assertRedirect();
+
+        expect(Lease::firstOrFail()->currency)->toBe('USD')
+            ->and(Lease::firstOrFail()->rent_amount)->toBe('95.000');
+    });
+
+    it('uses the existing lease currency when adding a tenant', function () {
+        Setting::set('currency', 'IDR');
+        $user = User::factory()->owner()->create();
+        $tenantA = Tenant::factory()->create();
+        $tenantB = Tenant::factory()->create();
+        $unit = Unit::factory()->withRate(1_750_000)->create();
+        $usdRate = $unit->rates()->create([
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'amount' => '95.00',
+            'currency' => 'USD',
+            'is_active' => true,
+        ]);
+        $lease = Lease::factory()->create([
+            'primary_tenant_id' => $tenantA->id,
+            'unit_id' => $unit->id,
+            'unit_rate_id' => $usdRate->id,
+            'rent_amount' => '95.00',
+            'currency' => 'USD',
+            'billing_interval' => 1,
+            'billing_unit' => 'month',
+            'billing_strategy' => 'advance',
+            'start_date' => '2026-06-01',
+        ]);
+        $unit->update(['capacity' => 2]);
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenantB), [
+                'unit_id' => $unit->id,
+                'start_date' => $lease->start_date->toDateString(),
+                'rent_amount' => '95.00',
+                'billing_interval' => 1,
+                'billing_unit' => 'month',
+                'billing_strategy' => $lease->billing_strategy->value,
+                'rent_due_day' => $lease->rent_due_day,
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($lease->fresh()->tenants)->toHaveCount(2);
+    });
+
+    it('does not replace null legacy lease terms when adding a tenant', function () {
+        Setting::set('currency', 'IDR');
+        $user = User::factory()->owner()->create();
+        $tenantA = Tenant::factory()->create();
+        $tenantB = Tenant::factory()->create();
+        $unit = Unit::factory()->create();
+        $lease = Lease::factory()->create([
+            'primary_tenant_id' => $tenantA->id,
+            'unit_id' => $unit->id,
+            'rent_amount' => null,
+            'currency' => 'IDR',
+            'start_date' => '2026-06-01',
+        ]);
+        $unit->update(['capacity' => 2]);
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenantB), [
+                'unit_id' => $unit->id,
+                'start_date' => $lease->start_date->toDateString(),
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        expect($lease->fresh()->tenants)->toHaveCount(2);
+    });
+
+    it('rejects a rate from another unit during assignment', function () {
+        $user = User::factory()->owner()->create();
+        $tenant = Tenant::factory()->create();
+        $unit = Unit::factory()->create();
+        $otherUnit = Unit::factory()->withRate(1_750_000)->create();
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenant), [
+                'unit_id' => $unit->id,
+                'unit_rate_id' => $otherUnit->rates()->firstOrFail()->id,
+                'start_date' => '2026-06-01',
+            ])
+            ->assertSessionHasErrors('unit_rate_id');
+
+        expect(Lease::query()->exists())->toBeFalse();
+    });
+
+    it('rejects a stale rate during assignment', function () {
+        $user = User::factory()->owner()->create();
+        $tenant = Tenant::factory()->create();
+        $unit = Unit::factory()->create();
+
+        $this->actingAs($user)
+            ->post(route('tenants.assign-unit', $tenant), [
+                'unit_id' => $unit->id,
+                'unit_rate_id' => $unit->rates()->max('id') + 1,
+                'start_date' => '2026-06-01',
+            ])
+            ->assertSessionHasErrors('unit_rate_id');
+
+        expect(Lease::query()->exists())->toBeFalse();
     });
 });

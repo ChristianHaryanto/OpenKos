@@ -1,16 +1,29 @@
 <?php
 
+use App\Http\Controllers\Dashboard\FinancialController;
 use App\Http\Controllers\Dashboard\OverviewController;
 use App\Http\Controllers\Dashboard\RentController;
+use App\Http\Controllers\DataTransferController;
+use App\Http\Controllers\ExpenseController;
+use App\Http\Controllers\InspectionController;
+use App\Http\Controllers\InspectionMediaController;
+use App\Http\Controllers\InspectionTemplateController;
 use App\Http\Controllers\LeaseController;
 use App\Http\Controllers\LeaseInvoiceController;
 use App\Http\Controllers\LeaseRentScheduleController;
 use App\Http\Controllers\MaintenanceTicketController;
 use App\Http\Controllers\PaymentAttemptController;
 use App\Http\Controllers\PaymentController;
+use App\Http\Controllers\PropertyAmenityController;
 use App\Http\Controllers\PropertyController;
 use App\Http\Controllers\PropertyDocumentsController;
 use App\Http\Controllers\PropertyLeasesController;
+use App\Http\Controllers\PropertyMediaController;
+use App\Http\Controllers\PropertyRateController;
+use App\Http\Controllers\PropertyUnitTypeController;
+use App\Http\Controllers\PublicListingController;
+use App\Http\Controllers\PublicListingMediaController;
+use App\Http\Controllers\RecurringExpenseController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SignedPaymentController;
 use App\Http\Controllers\TenantController;
@@ -21,10 +34,25 @@ use App\Http\Controllers\TenantPortal\LeaseController as TenantPortalLeaseContro
 use App\Http\Controllers\TenantPortal\NotificationController as TenantPortalNotificationController;
 use App\Http\Controllers\TenantPortal\PaymentController as TenantPortalPaymentController;
 use App\Http\Controllers\UnitController;
+use App\Http\Controllers\UnitTypeMediaController;
+use App\Http\Controllers\UnitTypeRateController;
+use App\Http\Controllers\UnitUtilityController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
-Route::redirect('/', '/login');
+Route::middleware('throttle:60,1')->group(function () {
+    Route::get('/', [PublicListingController::class, 'pageIndex'])->name('public.portal.index');
+    Route::redirect('/listings', '/', 308)->name('public.portal.redirect');
+    Route::get('listings/media/{media}', [PublicListingMediaController::class, 'show'])
+        ->whereNumber('media')
+        ->name('public.portal.media');
+
+    Route::scopeBindings()->prefix('listings')->name('public.portal.')->group(function () {
+        Route::get('{property:public_slug}', [PublicListingController::class, 'pageShow'])->name('show');
+        Route::get('{property:public_slug}/unit-types/{unitType:public_slug}', [PublicListingController::class, 'pageUnitType'])
+            ->name('unit-types.show');
+    });
+});
 
 Route::prefix('invitations')->name('users.invitations.')->middleware('guest')->group(function () {
     Route::get('{token}', [UserController::class, 'acceptInvitation'])->name('accept');
@@ -81,36 +109,171 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
     Route::prefix('dashboard')->group(function () {
         Route::get('/', OverviewController::class)->name('dashboard');
         Route::get('rent', RentController::class)->name('dashboard.rent');
+        Route::get('financial', FinancialController::class)
+            ->name('dashboard.financial')
+            ->middleware('permission:financials.view');
+    });
+
+    Route::prefix('data-transfer')->name('data-transfer.')->group(function () {
+        Route::get('/', [DataTransferController::class, 'index'])->name('index');
+        Route::post('preview', [DataTransferController::class, 'preview'])->name('preview');
+        Route::post('commit', [DataTransferController::class, 'commit'])->name('commit');
+        Route::get('{dataset}/template', [DataTransferController::class, 'template'])->name('template');
+        Route::get('{dataset}/export', [DataTransferController::class, 'export'])->name('export');
     });
 
     Route::prefix('properties')->name('properties.')->group(function () {
         Route::get('/', [PropertyController::class, 'index'])->name('index')->middleware('permission:properties.view');
         Route::post('/', [PropertyController::class, 'store'])->name('store')->middleware('permission:properties.create');
+        Route::get('transfer/import', [DataTransferController::class, 'importPage'])
+            ->defaults('dataset', 'properties')
+            ->name('transfer.import')
+            ->middleware('permission:properties.import');
+        Route::get('transfer/export', [DataTransferController::class, 'exportPage'])
+            ->defaults('dataset', 'properties')
+            ->name('transfer.export')
+            ->middleware('permission:properties.export');
 
         Route::scopeBindings()->group(function () {
             Route::prefix('{property}')->group(function () {
                 Route::get('/', [PropertyController::class, 'show'])->name('show')->middleware('permission:properties.view');
+                Route::get('listing', [PropertyController::class, 'listing'])->name('listing')->middleware('permission:properties.view');
+                Route::get('pricing', [PropertyRateController::class, 'index'])
+                    ->name('pricing.index')
+                    ->middleware(['permission:properties.view', 'property-rental-mode:property_pricing']);
+                Route::put('pricing', [PropertyRateController::class, 'update'])
+                    ->name('pricing.update')
+                    ->middleware(['permission:properties.update', 'property-rental-mode:property_pricing']);
                 Route::put('/', [PropertyController::class, 'update'])->name('update')->middleware('permission:properties.update');
+                Route::post('leases', [LeaseController::class, 'storeForProperty'])->name('leases.store')->middleware('permission:leases.create');
                 Route::delete('/', [PropertyController::class, 'destroy'])->name('destroy')->middleware('permission:properties.delete');
+                Route::patch('publication', [PropertyController::class, 'updatePublication'])->name('publication.update')->middleware('permission:properties.update');
                 Route::post('restore', [PropertyController::class, 'restore'])->name('restore')->middleware('permission:properties.update');
                 Route::get('leases', PropertyLeasesController::class)->name('workspace.leases')->middleware('permission:properties.view');
                 Route::get('documents', PropertyDocumentsController::class)->name('workspace.documents')->middleware('permission:properties.view');
+                Route::get('inspections', [InspectionController::class, 'propertyIndex'])
+                    ->name('workspace.inspections')
+                    ->middleware('permission:inspections.view')
+                    ->withoutMiddleware('permission:dashboard.view');
+                Route::post('inspections', [InspectionController::class, 'storeForProperty'])
+                    ->name('inspections.store')
+                    ->middleware('permission:inspections.create')
+                    ->withoutMiddleware('permission:dashboard.view');
 
-                Route::prefix('units')->name('units.')->group(function () {
+                Route::prefix('unit-types')->name('unit-types.')->middleware('property-rental-mode:unit_inventory')->group(function () {
+                    Route::get('/', [PropertyUnitTypeController::class, 'index'])->name('index')->middleware('permission:properties.view');
+                    Route::post('/', [PropertyUnitTypeController::class, 'store'])->name('store')->middleware('permission:properties.update');
+
+                    Route::prefix('{unitType}')->group(function () {
+                        Route::get('/', [PropertyUnitTypeController::class, 'show'])->name('show')->middleware('permission:properties.view');
+                        Route::get('units', [UnitController::class, 'indexForUnitType'])->name('units')->middleware('permission:units.view');
+                        Route::get('listing', [PropertyUnitTypeController::class, 'listing'])->name('listing')->middleware('permission:properties.view');
+                        Route::patch('status', [PropertyUnitTypeController::class, 'updateStatus'])->name('status.update')->middleware('permission:properties.update');
+                        Route::put('/', [PropertyUnitTypeController::class, 'update'])->name('update')->middleware('permission:properties.update');
+                        Route::delete('/', [PropertyUnitTypeController::class, 'destroy'])->name('destroy')->middleware('permission:properties.update');
+                        Route::post('restore', [PropertyUnitTypeController::class, 'restore'])->name('restore')->withTrashed()->middleware('permission:properties.update');
+                        Route::patch('publication', [PropertyUnitTypeController::class, 'updatePublication'])->name('publication.update')->middleware('permission:properties.update');
+                        Route::get('rates', [UnitTypeRateController::class, 'index'])->name('rates.index')->middleware('permission:properties.view');
+                        Route::put('rates', [UnitTypeRateController::class, 'update'])->name('rates.update')->middleware('permission:properties.update');
+
+                        Route::prefix('gallery')->name('gallery.')->group(function () {
+                            Route::post('/', [UnitTypeMediaController::class, 'store'])->name('store')->middleware('permission:properties.update');
+                            Route::post('reorder', [UnitTypeMediaController::class, 'reorder'])->name('reorder')->middleware('permission:properties.update');
+                            Route::get('{media}', [UnitTypeMediaController::class, 'show'])->name('show')->whereNumber('media')->middleware('permission:properties.view');
+                            Route::patch('{media}', [UnitTypeMediaController::class, 'update'])->name('update')->whereNumber('media')->middleware('permission:properties.update');
+                            Route::delete('{media}', [UnitTypeMediaController::class, 'destroy'])->name('destroy')->whereNumber('media')->middleware('permission:properties.update');
+                        });
+                    });
+                });
+
+                Route::put('facilities', [PropertyAmenityController::class, 'syncProperty'])->name('facilities.update')->middleware('permission:properties.update');
+
+                Route::prefix('gallery')->name('gallery.')->group(function () {
+                    Route::post('/', [PropertyMediaController::class, 'store'])->name('store')->middleware('permission:properties.update');
+                    Route::post('reorder', [PropertyMediaController::class, 'reorder'])->name('reorder')->middleware('permission:properties.update');
+                    Route::get('{media}', [PropertyMediaController::class, 'show'])->name('show')->whereNumber('media')->middleware('permission:properties.view');
+                    Route::patch('{media}', [PropertyMediaController::class, 'update'])->name('update')->whereNumber('media')->middleware('permission:properties.update');
+                    Route::delete('{media}', [PropertyMediaController::class, 'destroy'])->name('destroy')->whereNumber('media')->middleware('permission:properties.update');
+                });
+
+                Route::prefix('units')->name('units.')->middleware('property-rental-mode:unit_inventory')->group(function () {
                     Route::get('/', [UnitController::class, 'index'])->name('index')->middleware('permission:units.view');
                     Route::post('/', [UnitController::class, 'store'])->name('store')->middleware('permission:units.create');
+                    Route::post('bulk-assign-unit-type', [UnitController::class, 'bulkAssignUnitType'])
+                        ->name('bulk-assign-unit-type')
+                        ->middleware('permission:units.update');
+                    Route::get('transfer/import', [DataTransferController::class, 'importPage'])
+                        ->defaults('dataset', 'units')
+                        ->name('transfer.import')
+                        ->middleware('permission:units.import');
+                    Route::post('transfer/preview', [DataTransferController::class, 'preview'])
+                        ->defaults('dataset', 'units')
+                        ->name('transfer.preview')
+                        ->middleware('permission:units.import');
+                    Route::post('transfer/commit', [DataTransferController::class, 'commit'])
+                        ->defaults('dataset', 'units')
+                        ->name('transfer.commit')
+                        ->middleware('permission:units.import');
+                    Route::get('transfer/export', [DataTransferController::class, 'exportPage'])
+                        ->defaults('dataset', 'units')
+                        ->name('transfer.export')
+                        ->middleware('permission:units.export');
 
                     Route::prefix('{unit}')->group(function () {
                         Route::get('/', [UnitController::class, 'show'])->name('show')->middleware('permission:units.view');
                         Route::put('/', [UnitController::class, 'update'])->name('update')->middleware('permission:units.update');
                         Route::delete('/', [UnitController::class, 'destroy'])->name('destroy')->middleware('permission:units.delete');
                         Route::post('restore', [UnitController::class, 'restore'])->name('restore')->withTrashed()->middleware('permission:units.update');
+                        Route::get('rates/transfer/import', [DataTransferController::class, 'importPage'])
+                            ->defaults('dataset', 'unit-rates')
+                            ->name('rates.transfer.import')
+                            ->middleware('permission:unit-rates.import');
+                        Route::post('rates/transfer/preview', [DataTransferController::class, 'preview'])
+                            ->defaults('dataset', 'unit-rates')
+                            ->name('rates.transfer.preview')
+                            ->middleware('permission:unit-rates.import');
+                        Route::post('rates/transfer/commit', [DataTransferController::class, 'commit'])
+                            ->defaults('dataset', 'unit-rates')
+                            ->name('rates.transfer.commit')
+                            ->middleware('permission:unit-rates.import');
+                        Route::get('rates/transfer/export', [DataTransferController::class, 'exportPage'])
+                            ->defaults('dataset', 'unit-rates')
+                            ->name('rates.transfer.export')
+                            ->middleware('permission:unit-rates.export');
+                        Route::get('rates', [UnitController::class, 'rates'])->name('rates')->middleware('permission:units.view');
+                        Route::get('utilities', [UnitUtilityController::class, 'index'])->name('utilities')->middleware('permission:units.view');
+                        Route::post('utilities/meters', [UnitUtilityController::class, 'storeMeter'])
+                            ->name('utilities.meters.store')
+                            ->middleware('permission:units.update');
+                        Route::put('utilities/meters/{meter}', [UnitUtilityController::class, 'updateMeter'])
+                            ->name('utilities.meters.update')
+                            ->middleware('permission:units.update');
+                        Route::post('utilities/meters/{meter}/readings', [UnitUtilityController::class, 'storeReading'])
+                            ->name('utilities.readings.store')
+                            ->middleware('permission:units.update');
+                        Route::put('utilities/meters/{meter}/readings/{reading}', [UnitUtilityController::class, 'updateReading'])
+                            ->name('utilities.readings.update')
+                            ->middleware('permission:units.update');
+                        Route::delete('utilities/meters/{meter}/readings/{reading}', [UnitUtilityController::class, 'destroyReading'])
+                            ->name('utilities.readings.destroy')
+                            ->middleware('permission:units.update');
+                        Route::post('utilities/meters/{meter}/readings/{reading}/correction', [UnitUtilityController::class, 'storeCorrection'])
+                            ->name('utilities.readings.corrections.store')
+                            ->middleware('permission:units.update');
                         Route::get('maintenance-history', [UnitController::class, 'maintenanceHistory'])
                             ->name('maintenance-history')
                             ->middleware('permission:maintenance-tickets.view');
                         Route::get('lease-history', [UnitController::class, 'leaseHistory'])
                             ->name('lease-history')
                             ->middleware('permission:leases.view');
+                        Route::get('inspections', [InspectionController::class, 'unitIndex'])
+                            ->name('inspections')
+                            ->middleware('permission:inspections.view')
+                            ->withoutMiddleware('permission:dashboard.view');
+                        Route::post('inspections', [InspectionController::class, 'storeForUnit'])
+                            ->name('inspections.store')
+                            ->middleware('permission:inspections.create')
+                            ->withoutMiddleware('permission:dashboard.view');
 
                         Route::prefix('leases')->name('leases.')->group(function () {
                             Route::get('/', [LeaseController::class, 'index'])->name('index')->middleware('permission:leases.view');
@@ -128,6 +291,14 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
     Route::prefix('tenants')->name('tenants.')->group(function () {
         Route::get('/', [TenantController::class, 'index'])->name('index')->middleware('permission:tenants.view');
         Route::post('/', [TenantController::class, 'store'])->name('store')->middleware('permission:tenants.create');
+        Route::get('transfer/import', [DataTransferController::class, 'importPage'])
+            ->defaults('dataset', 'tenants')
+            ->name('transfer.import')
+            ->middleware('permission:tenants.import');
+        Route::get('transfer/export', [DataTransferController::class, 'exportPage'])
+            ->defaults('dataset', 'tenants')
+            ->name('transfer.export')
+            ->middleware('permission:tenants.export');
 
         Route::prefix('{tenant}')->whereNumber('tenant')->group(function () {
             Route::get('/', [TenantController::class, 'show'])->name('show')->middleware('permission:tenants.view');
@@ -155,6 +326,14 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
         Route::prefix('{lease}')->whereNumber('lease')->group(function () {
             Route::get('/', [LeaseController::class, 'show'])->name('show')->middleware('permission:leases.view');
             Route::get('documents', [LeaseController::class, 'documents'])->name('workspace.documents')->middleware('permission:leases.view');
+            Route::get('inspections', [InspectionController::class, 'leaseIndex'])
+                ->name('workspace.inspections')
+                ->middleware('permission:inspections.view')
+                ->withoutMiddleware('permission:dashboard.view');
+            Route::post('inspections', [InspectionController::class, 'storeForLease'])
+                ->name('inspections.store')
+                ->middleware('permission:inspections.create')
+                ->withoutMiddleware('permission:dashboard.view');
             Route::get('invoices', [LeaseInvoiceController::class, 'index'])->name('workspace.invoices')->middleware('permission:leases.view');
             Route::get('invoices/{invoice}', [LeaseInvoiceController::class, 'show'])->name('workspace.invoices.show')->middleware('permission:leases.view');
             Route::post('invoices/{invoice}/payment-attempts/{paymentAttempt}/recheck', [PaymentAttemptController::class, 'recheck'])
@@ -165,6 +344,7 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
             Route::get('invoices/{invoice}/download', [LeaseInvoiceController::class, 'download'])->name('workspace.invoices.download')->middleware('permission:leases.view');
             Route::get('rent-schedule', LeaseRentScheduleController::class)->name('rent-schedule')->middleware('permission:leases.view');
             Route::post('move-out', [LeaseController::class, 'moveOut'])->name('move-out')->middleware('permission:leases.move_out');
+            Route::post('deposit-settlement', [LeaseController::class, 'saveDepositSettlement'])->name('deposit-settlement')->middleware('permission:leases.move_out');
             Route::post('renew', [LeaseController::class, 'renew'])->name('renew')->middleware('permission:leases.renew');
 
             Route::prefix('payments')->group(function () {
@@ -173,6 +353,40 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
             });
         });
     });
+
+    Route::prefix('inspections')
+        ->name('inspections.')
+        ->withoutMiddleware('permission:dashboard.view')
+        ->group(function () {
+            Route::get('/', [InspectionController::class, 'index'])
+                ->name('index')
+                ->middleware('permission:inspections.view');
+
+            Route::prefix('templates')->name('templates.')->middleware('permission:inspection-templates.manage')->group(function () {
+                Route::get('/', [InspectionTemplateController::class, 'index'])->name('index');
+                Route::post('/', [InspectionTemplateController::class, 'store'])->name('store');
+                Route::patch('{inspectionTemplate}', [InspectionTemplateController::class, 'update'])->name('update');
+            });
+
+            Route::get('{inspection}', [InspectionController::class, 'show'])
+                ->whereNumber('inspection')
+                ->name('show')
+                ->middleware('permission:inspections.view');
+            Route::put('{inspection}', [InspectionController::class, 'update'])
+                ->whereNumber('inspection')
+                ->name('update')
+                ->middleware('permission:inspections.update');
+            Route::post('{inspection}/complete', [InspectionController::class, 'complete'])
+                ->whereNumber('inspection')
+                ->name('complete')
+                ->middleware('permission:inspections.complete');
+
+            Route::prefix('{inspection}/items/{item}/photos')->name('items.photos.')->group(function () {
+                Route::post('/', [InspectionMediaController::class, 'store'])->name('store')->middleware('permission:inspections.update');
+                Route::get('{media}', [InspectionMediaController::class, 'show'])->whereNumber('media')->name('show')->middleware('permission:inspections.view');
+                Route::delete('{media}', [InspectionMediaController::class, 'destroy'])->whereNumber('media')->name('destroy')->middleware('permission:inspections.update');
+            });
+        });
 
     Route::prefix('payments/{payment}')->name('payments.')->scopeBindings()->group(function () {
         Route::get('proof/{proof}', [PaymentController::class, 'proof'])->name('proof');
@@ -188,6 +402,36 @@ Route::middleware(['auth', 'verified', 'permission:dashboard.view'])->group(func
             Route::put('/', [MaintenanceTicketController::class, 'update'])->name('update')->middleware('permission:maintenance-tickets.update');
             Route::delete('/', [MaintenanceTicketController::class, 'destroy'])->name('destroy')->middleware('permission:maintenance-tickets.delete');
             Route::post('assign', [MaintenanceTicketController::class, 'assign'])->name('assign');
+        });
+    });
+
+    Route::prefix('expenses')->name('expenses.')->group(function () {
+        Route::get('/', [ExpenseController::class, 'index'])->name('index')->middleware('permission:expenses.view');
+        Route::post('/', [ExpenseController::class, 'store'])->name('store')->middleware('permission:expenses.create');
+        Route::get('transfer/import', [DataTransferController::class, 'importPage'])
+            ->defaults('dataset', 'expenses')
+            ->name('transfer.import')
+            ->middleware('permission:expenses.import');
+        Route::get('transfer/export', [DataTransferController::class, 'exportPage'])
+            ->defaults('dataset', 'expenses')
+            ->name('transfer.export')
+            ->middleware('permission:expenses.export');
+
+        Route::prefix('recurring')->name('recurring.')->group(function () {
+            Route::get('/', [RecurringExpenseController::class, 'index'])->name('index')->middleware('permission:expenses.view');
+            Route::post('/', [RecurringExpenseController::class, 'store'])->name('store')->middleware('permission:expenses.create');
+
+            Route::prefix('{recurringExpense}')->whereNumber('recurringExpense')->group(function () {
+                Route::put('/', [RecurringExpenseController::class, 'update'])->name('update')->middleware('permission:expenses.update');
+                Route::post('pause', [RecurringExpenseController::class, 'pause'])->name('pause')->middleware('permission:expenses.update');
+                Route::post('resume', [RecurringExpenseController::class, 'resume'])->name('resume')->middleware('permission:expenses.update');
+            });
+        });
+
+        Route::prefix('{expense}')->whereNumber('expense')->group(function () {
+            Route::put('/', [ExpenseController::class, 'update'])->name('update')->middleware('permission:expenses.update');
+            Route::delete('/', [ExpenseController::class, 'destroy'])->name('destroy')->middleware('permission:expenses.delete');
+            Route::get('receipt', [ExpenseController::class, 'receipt'])->name('receipt')->middleware('permission:expenses.view');
         });
     });
 

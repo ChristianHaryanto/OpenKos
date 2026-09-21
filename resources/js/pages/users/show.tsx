@@ -3,6 +3,8 @@ import { EntityWorkspaceLayout } from '@/components/shared/entity-workspace-layo
 import { StatusBadge } from '@/components/shared/status-badge';
 import { WorkspaceTabs } from '@/components/shared/workspace-tabs';
 import { Badge } from '@/components/ui/badge';
+import { formatDate, formatDateTime } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 
 import type { WorkspaceUser } from '@/types';
 
@@ -21,9 +23,9 @@ export default function UserWorkspace({ user }: { user: WorkspaceUser }) {
             title={user.name}
             subtitle={user.email}
             backRoute="/users"
-            backLabel="All users"
+            backLabel={t('All users')}
         >
-            <Head title={`${user.name} — User`} />
+            <Head title={`${user.name} — ${t('User')}`} />
 
             <WorkspaceTabs
                 workspace="user"
@@ -50,40 +52,36 @@ export default function UserWorkspace({ user }: { user: WorkspaceUser }) {
 
                 <div className="grid grid-cols-2 gap-4 rounded-lg border p-4 md:grid-cols-3">
                     <Field
-                        label="Last login"
+                        label={t('Last login')}
                         value={
                             user.last_login_at
-                                ? new Date(user.last_login_at).toLocaleString()
-                                : 'Never'
+                                ? formatDateTime(user.last_login_at)
+                                : t('Never')
                         }
                     />
                     <Field
-                        label="Email verified"
+                        label={t('Email verified')}
                         value={
                             user.email_verified_at
-                                ? new Date(
-                                      user.email_verified_at,
-                                  ).toLocaleDateString()
-                                : 'No'
+                                ? formatDate(user.email_verified_at)
+                                : t('No')
                         }
                     />
                     <Field
-                        label="Invited"
+                        label={t('Invited')}
                         value={
-                            user.invited_at
-                                ? new Date(user.invited_at).toLocaleDateString()
-                                : '—'
+                            user.invited_at ? formatDate(user.invited_at) : '—'
                         }
                     />
                 </div>
 
                 <div>
                     <p className="mb-2 text-xs text-muted-foreground">
-                        Assigned properties
+                        {t('Assigned properties')}
                     </p>
                     {user.properties.length === 0 ? (
                         <p className="text-sm text-muted-foreground">
-                            No properties assigned.
+                            {t('No properties assigned.')}
                         </p>
                     ) : (
                         <div className="flex flex-wrap gap-2">

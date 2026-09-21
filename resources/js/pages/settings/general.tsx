@@ -1,5 +1,9 @@
-import { useForm } from '@inertiajs/react';
+import { router, useForm, usePage } from '@inertiajs/react';
+import type { FormEvent } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { SearchInput } from '@/components/data-table/search-input';
 import { AppearanceTabs } from '@/components/features';
+import { InputError } from '@/components/shared';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -8,6 +12,7 @@ import {
     CardHeader,
     CardTitle,
 } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -18,13 +23,21 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { t } from '@/lib/i18n';
 import {
     edit as editGeneral,
     update as updateGeneral,
 } from '@/routes/settings/general';
+import {
+    destroy as destroyBranding,
+    update as updateBranding,
+} from '@/routes/settings/general/branding';
+
+type BrandingAsset = 'logo' | 'favicon';
 
 export default function General({
     settings,
+    locale_options: localeOptions,
     timezone_list: timezoneList,
 }: {
     settings: {
@@ -32,13 +45,50 @@ export default function General({
         country_code: string;
         locale: string;
         currency: string;
+        supported_currencies: string[];
         timezone: string;
         lease_id_prefix: string;
         invoice_id_prefix: string;
         invoice_pdf_enabled: boolean;
     };
+    locale_options: Record<string, string>;
     timezone_list: string[];
 }) {
+    const { app, branding } = usePage<{
+        app: { currency_scales: Record<string, number> };
+        branding: {
+            logoUrl: string;
+            faviconUrl: string;
+            hasCustomLogo: boolean;
+            hasCustomFavicon: boolean;
+            hasConfiguredLogo: boolean;
+            hasConfiguredFavicon: boolean;
+        };
+    }>().props;
+    const allCurrencyOptions = Object.keys(app.currency_scales).sort();
+    const currencyNames = useMemo(
+        () => new Intl.DisplayNames(['en'], { type: 'currency' }),
+        [],
+    );
+
+    const currencyLabel = useCallback(
+        (currency: string): string =>
+            `${currency} — ${currencyNames.of(currency) ?? currency}`,
+        [currencyNames],
+    );
+    const [currencySearch, setCurrencySearch] = useState('');
+    const normalizedCurrencySearch = currencySearch.trim().toLowerCase();
+    const currencyOptions = allCurrencyOptions.filter((currency) =>
+        currencyLabel(currency)
+            .toLowerCase()
+            .includes(normalizedCurrencySearch),
+    );
+    const [uploadingBranding, setUploadingBranding] =
+        useState<BrandingAsset | null>(null);
+    const [brandingErrors, setBrandingErrors] = useState<
+        Record<string, string>
+    >({});
+
     const siteForm = useForm({
         site_name: settings.site_name,
     });
@@ -47,8 +97,41 @@ export default function General({
         country_code: settings.country_code,
         locale: settings.locale,
         currency: settings.currency,
+        supported_currencies: settings.supported_currencies,
         timezone: settings.timezone,
     });
+
+    function setDefaultCurrency(currency: string): void {
+        localizationForm.setData((current) => ({
+            ...current,
+            currency,
+            supported_currencies: current.supported_currencies.includes(
+                currency,
+            )
+                ? current.supported_currencies
+                : [...current.supported_currencies, currency],
+        }));
+    }
+
+    function toggleSupportedCurrency(currency: string, checked: boolean): void {
+        if (!checked && currency === localizationForm.data.currency) {
+            return;
+        }
+
+        localizationForm.setData(
+            'supported_currencies',
+            checked
+                ? Array.from(
+                      new Set([
+                          ...localizationForm.data.supported_currencies,
+                          currency,
+                      ]),
+                  )
+                : localizationForm.data.supported_currencies.filter(
+                      (item) => item !== currency,
+                  ),
+        );
+    }
 
     const referenceForm = useForm({
         lease_id_prefix: settings.lease_id_prefix,
@@ -59,14 +142,165 @@ export default function General({
         invoice_pdf_enabled: settings.invoice_pdf_enabled,
     });
 
+    function uploadBranding(
+        event: FormEvent<HTMLFormElement>,
+        asset: BrandingAsset,
+    ): void {
+        event.preventDefault();
+
+        const form = event.currentTarget;
+
+        setUploadingBranding(asset);
+        setBrandingErrors({});
+
+        router.post(updateBranding.url({ asset }), new FormData(form), {
+            preserveScroll: true,
+            onError: (errors) => setBrandingErrors(errors),
+            onFinish: () => {
+                setUploadingBranding(null);
+                form.reset();
+            },
+        });
+    }
+
+    function removeBranding(asset: BrandingAsset): void {
+        setUploadingBranding(asset);
+        setBrandingErrors({});
+
+        router.delete(destroyBranding.url({ asset }), {
+            preserveScroll: true,
+            onError: (errors) => setBrandingErrors(errors),
+            onFinish: () => setUploadingBranding(null),
+        });
+    }
+
     return (
         <div className="space-y-6">
             <div>
-                <h2 className="text-lg font-medium">General settings</h2>
+                <h2 className="text-lg font-medium">{t('General settings')}</h2>
                 <p className="mt-1 text-sm text-muted-foreground">
-                    Manage application-wide settings.
+                    {t('Manage application-wide settings.')}
                 </p>
             </div>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle>{t('Branding')}</CardTitle>
+                    <CardDescription>
+                        {t(
+                            'Customize the logo and favicon used by this installation.',
+                        )}
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-6 lg:grid-cols-2">
+                    {(
+                        [
+                            {
+                                asset: 'logo',
+                                title: 'Website logo',
+                                description:
+                                    'Shown in application navigation and authentication pages.',
+                                url: branding.logoUrl,
+                                hasCustom: branding.hasCustomLogo,
+                                hasConfigured: branding.hasConfiguredLogo,
+                                accept: '.jpg,.jpeg,.png,.webp',
+                                formats: 'JPG, PNG, or WebP · 2 MB maximum',
+                            },
+                            {
+                                asset: 'favicon',
+                                title: 'Browser favicon',
+                                description:
+                                    'Shown in browser tabs and bookmarks.',
+                                url: branding.faviconUrl,
+                                hasCustom: branding.hasCustomFavicon,
+                                hasConfigured: branding.hasConfiguredFavicon,
+                                accept: '.png,.ico',
+                                formats: 'PNG or ICO · 512 KB maximum',
+                            },
+                        ] as const
+                    ).map((item) => (
+                        <div
+                            key={item.asset}
+                            className="space-y-4 rounded-lg border p-4"
+                        >
+                            <div className="flex items-center gap-4">
+                                <div className="flex size-20 items-center justify-center rounded-md border bg-muted/30 p-2">
+                                    <img
+                                        src={item.url}
+                                        alt={t(`${item.title} preview`)}
+                                        className="size-full object-contain"
+                                    />
+                                </div>
+                                <div>
+                                    <h3 className="font-medium">
+                                        {t(item.title)}
+                                    </h3>
+                                    <p className="text-sm text-muted-foreground">
+                                        {t(item.description)}
+                                    </p>
+                                    <p className="mt-1 text-xs text-muted-foreground">
+                                        {item.hasCustom
+                                            ? t('Using custom asset')
+                                            : t('Using bundled default')}
+                                    </p>
+                                </div>
+                            </div>
+
+                            <form
+                                onSubmit={(event) =>
+                                    uploadBranding(event, item.asset)
+                                }
+                                className="space-y-3"
+                            >
+                                <div className="grid gap-2">
+                                    <Label htmlFor={`${item.asset}-file`}>
+                                        {t('Upload replacement')}
+                                    </Label>
+                                    <Input
+                                        id={`${item.asset}-file`}
+                                        name="file"
+                                        type="file"
+                                        accept={item.accept}
+                                        required
+                                        aria-describedby={`${item.asset}-formats`}
+                                    />
+                                    <p
+                                        id={`${item.asset}-formats`}
+                                        className="text-xs text-muted-foreground"
+                                    >
+                                        {t(item.formats)}
+                                    </p>
+                                    <InputError message={brandingErrors.file} />
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                    <Button
+                                        type="submit"
+                                        disabled={uploadingBranding !== null}
+                                    >
+                                        {uploadingBranding === item.asset
+                                            ? t('Uploading...')
+                                            : t('Upload')}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        disabled={
+                                            !item.hasConfigured ||
+                                            uploadingBranding !== null
+                                        }
+                                        onClick={() =>
+                                            removeBranding(item.asset)
+                                        }
+                                    >
+                                        {t('Restore default')}
+                                    </Button>
+                                </div>
+                            </form>
+                        </div>
+                    ))}
+                </CardContent>
+            </Card>
 
             <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
                 <div className="space-y-6">
@@ -78,15 +312,18 @@ export default function General({
                     >
                         <Card>
                             <CardHeader>
-                                <CardTitle>Site</CardTitle>
+                                <CardTitle>{t('Site')}</CardTitle>
                                 <CardDescription>
-                                    The name displayed throughout the
-                                    application.
+                                    {t(
+                                        'The name displayed throughout the application.',
+                                    )}
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="grid max-w-xs gap-2">
-                                    <Label htmlFor="site_name">Site name</Label>
+                                    <Label htmlFor="site_name">
+                                        {t('Site name')}
+                                    </Label>
                                     <Input
                                         id="site_name"
                                         name="site_name"
@@ -108,7 +345,7 @@ export default function General({
                                     )}
                                 </div>
                                 <Button disabled={siteForm.processing}>
-                                    Save
+                                    {t('Save')}
                                 </Button>
                             </CardContent>
                         </Card>
@@ -122,15 +359,17 @@ export default function General({
                     >
                         <Card>
                             <CardHeader>
-                                <CardTitle>Localization</CardTitle>
+                                <CardTitle>{t('Localization')}</CardTitle>
                                 <CardDescription>
-                                    Regional preferences for the application.
+                                    {t(
+                                        'Regional preferences for the application.',
+                                    )}
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="grid max-w-xs gap-2">
                                     <Label htmlFor="country_code">
-                                        Country
+                                        {t('Country')}
                                     </Label>
                                     <Input
                                         id="country_code"
@@ -160,21 +399,34 @@ export default function General({
                                 </div>
 
                                 <div className="grid max-w-xs gap-2">
-                                    <Label htmlFor="locale">Locale</Label>
-                                    <Input
-                                        id="locale"
-                                        name="locale"
+                                    <Label htmlFor="locale">
+                                        {t('Locale')}
+                                    </Label>
+                                    <Select
                                         value={localizationForm.data.locale}
-                                        onChange={(e) =>
+                                        onValueChange={(value) =>
                                             localizationForm.setData(
                                                 'locale',
-                                                e.target.value,
+                                                value,
                                             )
                                         }
-                                        maxLength={10}
-                                        placeholder="id"
-                                        required
-                                    />
+                                    >
+                                        <SelectTrigger id="locale">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {Object.entries(localeOptions).map(
+                                                ([value, label]) => (
+                                                    <SelectItem
+                                                        key={value}
+                                                        value={value}
+                                                    >
+                                                        {t(label)}
+                                                    </SelectItem>
+                                                ),
+                                            )}
+                                        </SelectContent>
+                                    </Select>
                                     {localizationForm.errors.locale && (
                                         <p className="text-sm text-red-600">
                                             {localizationForm.errors.locale}
@@ -182,23 +434,28 @@ export default function General({
                                     )}
                                 </div>
 
-                                <div className="grid max-w-xs gap-2">
-                                    <Label htmlFor="currency">Currency</Label>
-                                    <Input
-                                        id="currency"
-                                        name="currency"
+                                <div className="grid max-w-md gap-2">
+                                    <Label htmlFor="currency">
+                                        {t('Default currency')}
+                                    </Label>
+                                    <Select
                                         value={localizationForm.data.currency}
-                                        onChange={(e) =>
-                                            localizationForm.setData(
-                                                'currency',
-                                                e.target.value.toUpperCase(),
-                                            )
-                                        }
-                                        maxLength={3}
-                                        className="font-mono uppercase"
-                                        placeholder="IDR"
-                                        required
-                                    />
+                                        onValueChange={setDefaultCurrency}
+                                    >
+                                        <SelectTrigger id="currency">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {currencyOptions.map((currency) => (
+                                                <SelectItem
+                                                    key={currency}
+                                                    value={currency}
+                                                >
+                                                    {currencyLabel(currency)}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
                                     {localizationForm.errors.currency && (
                                         <p className="text-sm text-red-600">
                                             {localizationForm.errors.currency}
@@ -206,8 +463,88 @@ export default function General({
                                     )}
                                 </div>
 
+                                <div className="grid max-w-md gap-2">
+                                    <div>
+                                        <Label>
+                                            {t('Supported currencies')}
+                                        </Label>
+                                        <p className="text-sm text-muted-foreground">
+                                            {t(
+                                                'Available for new pricing and billing rates.',
+                                            )}{' '}
+                                            {t(
+                                                'Existing records keep their original currency.',
+                                            )}
+                                        </p>
+                                    </div>
+                                    <SearchInput
+                                        value={currencySearch}
+                                        onChange={setCurrencySearch}
+                                        onClear={() => setCurrencySearch('')}
+                                        id="supported-currencies-search"
+                                        aria-label={t('Search')}
+                                        placeholder="Search"
+                                        className="w-full md:max-w-none"
+                                    />
+                                    <div className="grid max-h-72 gap-2 overflow-y-auto rounded-md border p-3 sm:grid-cols-2">
+                                        {currencyOptions.length === 0 && (
+                                            <p className="col-span-full p-2 text-sm text-muted-foreground">
+                                                {t('No options found.')}
+                                            </p>
+                                        )}
+                                        {currencyOptions.map((currency) => {
+                                            const isSupported =
+                                                localizationForm.data.supported_currencies.includes(
+                                                    currency,
+                                                );
+                                            const isDefault =
+                                                localizationForm.data
+                                                    .currency === currency;
+
+                                            return (
+                                                <label
+                                                    key={currency}
+                                                    className="flex items-start gap-2 rounded-md p-2 text-sm hover:bg-muted/50"
+                                                >
+                                                    <Checkbox
+                                                        checked={isSupported}
+                                                        disabled={isDefault}
+                                                        onCheckedChange={(
+                                                            checked,
+                                                        ) =>
+                                                            toggleSupportedCurrency(
+                                                                currency,
+                                                                checked ===
+                                                                    true,
+                                                            )
+                                                        }
+                                                    />
+                                                    <span>
+                                                        <span className="block font-mono font-medium">
+                                                            {currency}
+                                                        </span>
+                                                        <span className="block text-xs text-muted-foreground">
+                                                            {currencyNames.of(
+                                                                currency,
+                                                            ) ?? currency}
+                                                        </span>
+                                                    </span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                    <InputError
+                                        message={
+                                            localizationForm.errors
+                                                .supported_currencies
+                                        }
+                                    />
+                                </div>
+
                                 <div className="grid max-w-xs gap-2">
-                                    <Label htmlFor="timezone">Timezone</Label>
+                                    <Label htmlFor="timezone">
+                                        {t('Timezone')}
+                                    </Label>
                                     <Select
                                         value={localizationForm.data.timezone}
                                         onValueChange={(value) =>
@@ -236,7 +573,7 @@ export default function General({
                                 </div>
 
                                 <Button disabled={localizationForm.processing}>
-                                    Save
+                                    {t('Save')}
                                 </Button>
                             </CardContent>
                         </Card>
@@ -246,9 +583,9 @@ export default function General({
                 <div className="space-y-6">
                     <Card>
                         <CardHeader>
-                            <CardTitle>Appearance</CardTitle>
+                            <CardTitle>{t('Appearance')}</CardTitle>
                             <CardDescription>
-                                Choose how the application looks for you.
+                                {t('Choose how the application looks for you.')}
                             </CardDescription>
                         </CardHeader>
                         <CardContent>
@@ -269,10 +606,11 @@ export default function General({
                     >
                         <Card>
                             <CardHeader>
-                                <CardTitle>Invoice PDFs</CardTitle>
+                                <CardTitle>{t('Invoice PDFs')}</CardTitle>
                                 <CardDescription>
-                                    PDF generation runs in the queue and needs a
-                                    running worker when enabled.
+                                    {t(
+                                        'PDF generation runs in the queue and needs a running worker when enabled.',
+                                    )}
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
@@ -292,17 +630,25 @@ export default function General({
                                     />
                                     <Label htmlFor="invoice_pdf_enabled">
                                         {invoicePdfForm.data.invoice_pdf_enabled
-                                            ? 'Invoice PDF generation is enabled'
-                                            : 'Invoice PDF generation is disabled'}
+                                            ? t(
+                                                  'Invoice PDF generation is enabled',
+                                              )
+                                            : t(
+                                                  'Invoice PDF generation is disabled',
+                                              )}
                                     </Label>
                                 </div>
                                 <p className="text-sm text-muted-foreground">
                                     {invoicePdfForm.data.invoice_pdf_enabled
-                                        ? 'Invoice PDFs are generated in the background, stored privately, and reused for downloads and supported reminders.'
-                                        : 'Invoices remain available as web pages. Use the browser print or save-as-PDF flow; reminders include the invoice link without an attachment.'}
+                                        ? t(
+                                              'Invoice PDFs are generated in the background, stored privately, and reused for downloads and supported reminders.',
+                                          )
+                                        : t(
+                                              'Invoices remain available as web pages. Use the browser print or save-as-PDF flow; reminders include the invoice link without an attachment.',
+                                          )}
                                 </p>
                                 <Button disabled={invoicePdfForm.processing}>
-                                    Save
+                                    {t('Save')}
                                 </Button>
                             </CardContent>
                         </Card>
@@ -316,16 +662,17 @@ export default function General({
                     >
                         <Card>
                             <CardHeader>
-                                <CardTitle>References</CardTitle>
+                                <CardTitle>{t('References')}</CardTitle>
                                 <CardDescription>
-                                    Prefixes used for auto-generated reference
-                                    numbers.
+                                    {t(
+                                        'Prefixes used for auto-generated reference numbers.',
+                                    )}
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="grid max-w-xs gap-2">
                                     <Label htmlFor="lease_id_prefix">
-                                        Lease prefix
+                                        {t('Lease prefix')}
                                     </Label>
                                     <Input
                                         id="lease_id_prefix"
@@ -345,7 +692,7 @@ export default function General({
                                         required
                                     />
                                     <p className="text-xs text-muted-foreground">
-                                        Format:{' '}
+                                        {t('Format:')}{' '}
                                         <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
                                             {referenceForm.data.lease_id_prefix}
                                             20260001
@@ -363,7 +710,7 @@ export default function General({
 
                                 <div className="grid max-w-xs gap-2">
                                     <Label htmlFor="invoice_id_prefix">
-                                        Invoice prefix
+                                        {t('Invoice prefix')}
                                     </Label>
                                     <Input
                                         id="invoice_id_prefix"
@@ -383,7 +730,7 @@ export default function General({
                                         required
                                     />
                                     <p className="text-xs text-muted-foreground">
-                                        Format:{' '}
+                                        {t('Format:')}{' '}
                                         <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
                                             {
                                                 referenceForm.data
@@ -403,7 +750,7 @@ export default function General({
                                 </div>
 
                                 <Button disabled={referenceForm.processing}>
-                                    Save
+                                    {t('Save')}
                                 </Button>
                             </CardContent>
                         </Card>

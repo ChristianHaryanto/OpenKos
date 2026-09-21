@@ -10,6 +10,7 @@ use App\Enums\PaymentStatus;
 use App\Events\Payment\PaymentRecorded;
 use App\Exceptions\InvoiceNotPayableException;
 use App\Exceptions\PaymentGatewayCreationException;
+use App\Exceptions\PaymentGatewayCurrencyUnsupportedException;
 use App\Exceptions\PaymentGatewayUnavailableException;
 use App\Exceptions\PaymentOverflowException;
 use App\Http\Requests\Payment\StoreTenantPortalPaymentRequest;
@@ -18,12 +19,16 @@ use App\Models\Payment;
 use App\Models\PaymentAttempt;
 use App\Models\Setting;
 use App\Services\Invoices\InvoicePdfArtifact;
+use App\Services\Localization\ApplicationLocale;
+use App\Services\Payments\MoneyConverter;
 use App\Services\Payments\PaymentGatewayManager;
+use Brick\Math\BigDecimal;
 use Illuminate\Contracts\View\View as ViewContract;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 use OpenKOS\Core\Enums\PaymentStatus as GatewayPaymentStatus;
@@ -33,6 +38,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PaymentController extends TenantPortalController
 {
+    public function __construct(private MoneyConverter $money) {}
+
     public function index(Request $request): Response
     {
         $tenant = $this->tenant($request);
@@ -51,13 +58,23 @@ class PaymentController extends TenantPortalController
             ->payable()
             ->whereRaw("{$outstandingSql} > ({$pendingPaymentSql})", $pendingPaymentBindings);
 
-        $outstandingSummary = (clone $actionableInvoices)
-            ->selectRaw(
-                "COUNT(*) as count, COALESCE(SUM({$outstandingSql} - ({$pendingPaymentSql})), 0) as amount",
-                $pendingPaymentBindings,
-            )
-            ->toBase()
-            ->first();
+        $outstandingSummaryRows = (clone $actionableInvoices)
+            ->select('invoices.*')
+            ->selectSub($pendingPaymentAmount, 'pending_payment_amount')
+            ->get();
+        $outstandingAmounts = $outstandingSummaryRows
+            ->groupBy(fn (Invoice $invoice): string => $invoice->currency)
+            ->map(function ($invoices, string $currency): array {
+                $amount = $invoices->reduce(
+                    fn (BigDecimal $total, Invoice $invoice): BigDecimal => $total
+                        ->plus(BigDecimal::of($invoice->outstanding)->minus((string) $invoice->pending_payment_amount)),
+                    BigDecimal::zero(),
+                );
+
+                return ['currency' => $currency, 'amount' => $amount->toString()];
+            })
+            ->values()
+            ->all();
         $nextDueDate = (clone $actionableInvoices)
             ->orderBy('due_date')
             ->first()?->due_date?->toDateString();
@@ -71,7 +88,9 @@ class PaymentController extends TenantPortalController
             ->through(fn (Invoice $invoice) => $invoice
                 ->setAttribute(
                     'payable_amount',
-                    number_format((float) $invoice->outstanding - (float) $invoice->pending_payment_amount, 2, '.', ''),
+                    BigDecimal::of($invoice->outstanding)
+                        ->minus((string) $invoice->pending_payment_amount)
+                        ->toString(),
                 )
                 ->append(['outstanding', 'display_status']));
 
@@ -87,7 +106,7 @@ class PaymentController extends TenantPortalController
 
         $paymentQuery = Payment::query()
             ->whereHas('invoice', fn (Builder $query) => $query->where('lease_id', $lease?->id))
-            ->with('invoice.lease.unit.property');
+            ->with('invoice.lease.property', 'invoice.lease.unit');
         $pendingPayments = (clone $paymentQuery)
             ->where('status', PaymentStatus::Pending)
             ->latest('payment_date')
@@ -109,8 +128,11 @@ class PaymentController extends TenantPortalController
                 ->get(),
             'finalizedPaymentCount' => $finalizedPaymentCount,
             'outstandingSummary' => [
-                'amount' => number_format((float) $outstandingSummary->amount, 2, '.', ''),
-                'count' => (int) $outstandingSummary->count,
+                'amounts' => $outstandingAmounts ?: [[
+                    'currency' => $lease?->currency ?? $this->money->normalizeCurrency(),
+                    'amount' => '0',
+                ]],
+                'count' => $outstandingSummaryRows->count(),
                 'next_due_date' => $nextDueDate,
                 'pending_payment_count' => $pendingPayments->count(),
             ],
@@ -148,7 +170,7 @@ class PaymentController extends TenantPortalController
 
         $payments = Payment::query()
             ->whereHas('invoice', fn (Builder $query) => $query->where('lease_id', $lease?->id))
-            ->with('invoice.lease.unit.property')
+            ->with('invoice.lease.property', 'invoice.lease.unit')
             ->whereIn('status', [PaymentStatus::Confirmed, PaymentStatus::Cancelled])
             ->latest('payment_date')
             ->latest('id')
@@ -168,7 +190,7 @@ class PaymentController extends TenantPortalController
     ): Response {
         $this->ensureTenantOwnsInvoice($request, $invoice);
 
-        $invoice->load(['lease.unit.property', 'lineItems', 'payments']);
+        $invoice->load(['lease.property', 'lease.unit', 'lineItems', 'payments']);
         $gatewayAttempts = $invoice->paymentAttempts()
             ->latest('id')
             ->get([
@@ -198,16 +220,30 @@ class PaymentController extends TenantPortalController
         $hasResumableAttempt = $gatewayAttempts->contains(
             fn (PaymentAttempt $attempt): bool => $attempt->resumable,
         );
+        $activeGateway = $hasResumableAttempt ? null : $gateways->active();
+        $currencySupported = $activeGateway === null
+            ? false
+            : $gateways->supportsCurrency($activeGateway, $invoice->currency) !== false;
+        $onlinePaymentUnavailableReason = ! $hasResumableAttempt
+            && $activeGateway !== null
+            && ! $currencySupported
+            ? __(':gateway is not available for :currency payments.', [
+                'gateway' => Str::headline($gateways->activeKey() ?? 'The active gateway'),
+                'currency' => $invoice->currency,
+            ])
+            : null;
 
         return Inertia::render('tenant-portal/payments/invoice', [
             'invoice' => $invoice,
             'invoicePdf' => ['status' => $invoicePdfStatus],
             'gatewayAttempts' => $gatewayAttempts,
-            'onlinePaymentAvailable' => $hasResumableAttempt || $gateways->active() !== null,
+            'onlinePaymentAvailable' => $hasResumableAttempt || $currencySupported,
+            'onlinePaymentUnavailableReason' => $onlinePaymentUnavailableReason,
             'lease' => [
                 'reference' => $invoice->lease->reference,
+                'target_type' => $invoice->lease->target_type,
                 'unit_name' => $invoice->lease->unit?->name,
-                'property_name' => $invoice->lease->unit?->property?->name,
+                'property_name' => $invoice->lease->property?->name,
             ],
         ]);
     }
@@ -218,6 +254,8 @@ class PaymentController extends TenantPortalController
 
         try {
             $result = $action->execute($invoice, $request->user());
+        } catch (PaymentGatewayCurrencyUnsupportedException $exception) {
+            return $this->gatewayPaymentError($exception->getMessage());
         } catch (InvoiceNotPayableException|PaymentGatewayUnavailableException) {
             return $this->gatewayPaymentError(__('Online payment is not available for this invoice.'));
         } catch (PaymentGatewayCreationException $exception) {
@@ -262,14 +300,15 @@ class PaymentController extends TenantPortalController
         );
     }
 
-    public function print(Request $request, Invoice $invoice): ViewContract
+    public function print(Request $request, Invoice $invoice, ApplicationLocale $locale): ViewContract
     {
         $this->ensureTenantOwnsInvoice($request, $invoice);
 
         $invoice->load([
             'lease.primaryTenant.user',
-            'lease.unit.property.city',
-            'lease.unit.property.region',
+            'lease.property.city',
+            'lease.property.region',
+            'lease.unit',
             'lineItems',
             'payments' => fn ($query) => $query
                 ->where('status', PaymentStatus::Confirmed)
@@ -278,12 +317,13 @@ class PaymentController extends TenantPortalController
         ]);
         $invoice->append(['outstanding', 'display_status']);
         $settings = Setting::some(['site_name', 'locale', 'currency']);
+        $resolvedLocale = $locale->resolve($settings['locale'] ?? null);
 
         return view('invoices.pdf', [
             'autoPrint' => true,
-            'currency' => $settings['currency'] ?? 'IDR',
+            'currency' => $invoice->currency,
             'invoice' => $invoice,
-            'locale' => $settings['locale'] ?? 'id',
+            'locale' => $resolvedLocale,
             'siteName' => $settings['site_name'] ?? config('app.name'),
         ]);
     }
@@ -298,7 +338,7 @@ class PaymentController extends TenantPortalController
         $request->ensureInvoiceIsPayable($invoice);
 
         $data = new RecordPaymentData(
-            amount: (int) $request->amount,
+            amount: (string) $request->amount,
             paymentDate: $request->paid_at,
             paymentMethod: $request->payment_method,
             notes: $request->notes,

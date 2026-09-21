@@ -1,5 +1,4 @@
 import { useForm } from '@inertiajs/react';
-import { Plus, Trash2 } from 'lucide-react';
 import { InputError } from '@/components/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,39 +18,48 @@ import {
     SheetTitle,
 } from '@/components/ui/sheet';
 import { Textarea } from '@/components/ui/textarea';
-import { BILLING_UNITS } from '@/lib/constants';
+import { t } from '@/lib/i18n';
 import properties from '@/routes/properties';
-import type { Property, Unit, UnitRate } from '@/types';
+import type { Property, Unit, UnitType } from '@/types';
 
-const emptyRate: UnitRate = {
-    billing_interval: 1,
-    billing_unit: 'month',
-    amount: '',
+type UnitFormData = {
+    name: string;
+    floor: string;
+    capacity: string;
+    size_sqm: string;
+    status: string;
+    description: string;
+    notes: string;
+    unit_type_id: string;
+    updated_at: string | null;
 };
 
 export default function UnitFormSheet({
     unit,
     property,
+    unitTypes,
     open,
     onOpenChange,
 }: {
     unit?: Unit | null;
     property: Property;
+    unitTypes: Pick<UnitType, 'id' | 'property_id' | 'name' | 'is_active'>[];
     open: boolean;
     onOpenChange: (open: boolean) => void;
 }) {
     const isEdit = Boolean(unit);
-
-    const { data, setData, submit, reset, processing, errors } = useForm({
-        name: unit?.name ?? '',
-        floor: unit?.floor ?? '',
-        capacity: String(unit?.capacity ?? 1),
-        rates: unit?.active_rates?.length ? unit.active_rates : [emptyRate],
-        size_sqm: unit?.size_sqm ?? '',
-        status: unit?.status ?? 'available',
-        description: unit?.description ?? '',
-        notes: unit?.notes ?? '',
-    });
+    const { data, setData, submit, reset, processing, errors } =
+        useForm<UnitFormData>({
+            name: unit?.name ?? '',
+            floor: unit?.floor ?? '',
+            capacity: String(unit?.capacity ?? 1),
+            size_sqm: unit?.size_sqm ?? '',
+            status: unit?.status ?? 'available',
+            description: unit?.description ?? '',
+            notes: unit?.notes ?? '',
+            unit_type_id: unit?.unit_type_id ? String(unit.unit_type_id) : '',
+            updated_at: unit?.updated_at ?? null,
+        });
 
     function handleOpenChange(next: boolean) {
         onOpenChange(next);
@@ -61,8 +69,8 @@ export default function UnitFormSheet({
         }
     }
 
-    function handleSubmit(e: React.FormEvent) {
-        e.preventDefault();
+    function handleSubmit(event: React.FormEvent) {
+        event.preventDefault();
         submit(
             isEdit
                 ? properties.units.update({
@@ -74,42 +82,17 @@ export default function UnitFormSheet({
         );
     }
 
-    function updateRate(
-        index: number,
-        field: keyof UnitRate,
-        value: string | number,
-    ) {
-        setData((prev) => {
-            const next = [...prev.rates];
-            next[index] = { ...next[index], [field]: value };
-
-            return { ...prev, rates: next };
-        });
-    }
-
-    function addRate() {
-        setData((prev) => ({
-            ...prev,
-            rates: [...prev.rates, { ...emptyRate }],
-        }));
-    }
-
-    function removeRate(index: number) {
-        setData((prev) => ({
-            ...prev,
-            rates: prev.rates.filter((_, i) => i !== index),
-        }));
-    }
-
     return (
         <Sheet open={open} onOpenChange={handleOpenChange}>
             <SheetContent className="sm:max-w-lg">
                 <SheetHeader>
-                    <SheetTitle>{isEdit ? 'Edit Unit' : 'New Unit'}</SheetTitle>
+                    <SheetTitle>
+                        {t(isEdit ? 'Edit Unit' : 'New Unit')}
+                    </SheetTitle>
                     <SheetDescription>
                         {isEdit
-                            ? 'Update unit details'
-                            : `Add a unit to ${property.name}`}
+                            ? t('Update unit details')
+                            : `${t('Add a unit to')} ${property.name}`}
                     </SheetDescription>
                 </SheetHeader>
 
@@ -119,182 +102,120 @@ export default function UnitFormSheet({
                 >
                     <div className="space-y-6">
                         <div className="grid gap-2">
-                            <Label htmlFor="name">Name</Label>
+                            <Label htmlFor="name">{t('Name')}</Label>
                             <Input
                                 id="name"
                                 required
                                 value={data.name}
-                                onChange={(e) =>
-                                    setData('name', e.target.value)
+                                onChange={(event) =>
+                                    setData('name', event.target.value)
                                 }
-                                placeholder="e.g. Unit 101"
+                                placeholder={t('e.g. Unit 101')}
                             />
                             <InputError message={errors.name} />
                         </div>
 
                         <div className="grid grid-cols-2 gap-4">
                             <div className="grid gap-2">
-                                <Label htmlFor="floor">Floor</Label>
+                                <Label htmlFor="floor">{t('Floor')}</Label>
                                 <Input
                                     id="floor"
                                     value={data.floor}
-                                    onChange={(e) =>
-                                        setData('floor', e.target.value)
+                                    onChange={(event) =>
+                                        setData('floor', event.target.value)
                                     }
-                                    placeholder="e.g. 1"
+                                    placeholder={t('e.g. 1')}
                                 />
                                 <InputError message={errors.floor} />
                             </div>
 
                             <div className="grid gap-2">
-                                <Label htmlFor="capacity">Capacity</Label>
+                                <Label htmlFor="capacity">
+                                    {t('Capacity')}
+                                </Label>
                                 <Input
                                     id="capacity"
                                     type="number"
                                     min={1}
                                     value={data.capacity}
-                                    onChange={(e) =>
-                                        setData('capacity', e.target.value)
+                                    onChange={(event) =>
+                                        setData('capacity', event.target.value)
                                     }
                                 />
                                 <InputError message={errors.capacity} />
                             </div>
                         </div>
 
-                        {/* Pricing Rates */}
-                        <section>
-                            <div className="mb-3 flex items-center justify-between">
-                                <h3 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-                                    Pricing Rates
-                                </h3>
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={addRate}
+                        <div className="grid gap-2">
+                            <Label htmlFor="unit-type">{t('Unit Type')}</Label>
+                            <Select
+                                value={data.unit_type_id || 'none'}
+                                onValueChange={(value) =>
+                                    setData(
+                                        'unit_type_id',
+                                        value === 'none' ? '' : value,
+                                    )
+                                }
+                            >
+                                <SelectTrigger
+                                    id="unit-type"
+                                    className="w-full"
                                 >
-                                    <Plus className="mr-1 size-3" />
-                                    Add Rate
-                                </Button>
-                            </div>
-
-                            <div className="space-y-3">
-                                {data.rates.map((rate, index) => (
-                                    <div
-                                        key={index}
-                                        className="flex items-end gap-2 rounded-lg border p-3"
-                                    >
-                                        <div className="grid flex-1 gap-1">
-                                            <Label className="text-xs">
-                                                Amount (IDR)
-                                            </Label>
-                                            <Input
-                                                type="number"
-                                                min={0}
-                                                step="0.01"
-                                                required
-                                                value={rate.amount}
-                                                onChange={(e) =>
-                                                    updateRate(
-                                                        index,
-                                                        'amount',
-                                                        e.target.value,
-                                                    )
-                                                }
-                                                placeholder="e.g. 1000000"
-                                            />
-                                        </div>
-                                        <div className="grid w-20 gap-1">
-                                            <Label className="text-xs">
-                                                Every
-                                            </Label>
-                                            <Input
-                                                type="number"
-                                                min={1}
-                                                value={rate.billing_interval}
-                                                onChange={(e) =>
-                                                    updateRate(
-                                                        index,
-                                                        'billing_interval',
-                                                        Number.parseInt(
-                                                            e.target.value,
-                                                        ) || 1,
-                                                    )
-                                                }
-                                            />
-                                        </div>
-                                        <div className="grid w-28 gap-1">
-                                            <Label className="text-xs">
-                                                Unit
-                                            </Label>
-                                            <Select
-                                                value={rate.billing_unit}
-                                                onValueChange={(val) =>
-                                                    updateRate(
-                                                        index,
-                                                        'billing_unit',
-                                                        val,
-                                                    )
-                                                }
-                                            >
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {BILLING_UNITS.map(
-                                                        (unit) => (
-                                                            <SelectItem
-                                                                key={unit}
-                                                                value={unit}
-                                                            >
-                                                                {unit}
-                                                            </SelectItem>
-                                                        ),
-                                                    )}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        {data.rates.length > 1 && (
-                                            <Button
-                                                type="button"
-                                                variant="ghost"
-                                                size="icon"
-                                                className="size-9 shrink-0 text-destructive"
-                                                onClick={() =>
-                                                    removeRate(index)
-                                                }
-                                            >
-                                                <Trash2 className="size-4" />
-                                            </Button>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                            <InputError message={errors.rates} />
-                        </section>
+                                    <SelectValue
+                                        placeholder={t('No Unit Type assigned')}
+                                    />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="none">
+                                        {t('No Unit Type assigned')}
+                                    </SelectItem>
+                                    {unitTypes.map((unitType) => (
+                                        <SelectItem
+                                            key={unitType.id}
+                                            value={String(unitType.id)}
+                                            disabled={
+                                                !unitType.is_active &&
+                                                unitType.id !==
+                                                    unit?.unit_type_id
+                                            }
+                                        >
+                                            {unitType.name}
+                                            {!unitType.is_active
+                                                ? ` (${t('inactive')})`
+                                                : ''}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <InputError message={errors.unit_type_id} />
+                        </div>
 
                         <div className="grid grid-cols-2 gap-4">
                             <div className="grid gap-2">
-                                <Label htmlFor="size_sqm">Size (m²)</Label>
+                                <Label htmlFor="size_sqm">
+                                    {t('Size (m²)')}
+                                </Label>
                                 <Input
                                     id="size_sqm"
                                     type="number"
                                     min={0}
                                     step="0.01"
                                     value={data.size_sqm}
-                                    onChange={(e) =>
-                                        setData('size_sqm', e.target.value)
+                                    onChange={(event) =>
+                                        setData('size_sqm', event.target.value)
                                     }
-                                    placeholder="e.g. 20"
+                                    placeholder={t('e.g. 20')}
                                 />
                                 <InputError message={errors.size_sqm} />
                             </div>
 
                             <div className="grid gap-2">
-                                <Label htmlFor="status">Status</Label>
+                                <Label htmlFor="status">{t('Status')}</Label>
                                 <Select
                                     value={data.status}
-                                    onValueChange={(v) => setData('status', v)}
+                                    onValueChange={(value) =>
+                                        setData('status', value)
+                                    }
                                 >
                                     <SelectTrigger
                                         id="status"
@@ -320,12 +241,12 @@ export default function UnitFormSheet({
                                                 value: 'unavailable',
                                                 label: 'Unavailable',
                                             },
-                                        ].map((opt) => (
+                                        ].map((option) => (
                                             <SelectItem
-                                                key={opt.value}
-                                                value={opt.value}
+                                                key={option.value}
+                                                value={option.value}
                                             >
-                                                {opt.label}
+                                                {t(option.label)}
                                             </SelectItem>
                                         ))}
                                     </SelectContent>
@@ -335,31 +256,34 @@ export default function UnitFormSheet({
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="description">Description</Label>
+                            <Label htmlFor="description">
+                                {t('Description')}
+                            </Label>
                             <Textarea
                                 id="description"
                                 value={data.description}
-                                onChange={(e) =>
-                                    setData('description', e.target.value)
+                                onChange={(event) =>
+                                    setData('description', event.target.value)
                                 }
-                                placeholder="Unit description"
+                                placeholder={t('Unit description')}
                             />
                             <InputError message={errors.description} />
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="notes">Notes</Label>
+                            <Label htmlFor="notes">{t('Notes')}</Label>
                             <Textarea
                                 id="notes"
                                 value={data.notes}
-                                onChange={(e) =>
-                                    setData('notes', e.target.value)
+                                onChange={(event) =>
+                                    setData('notes', event.target.value)
                                 }
-                                placeholder="Additional notes"
+                                placeholder={t('Additional notes')}
                             />
                             <InputError message={errors.notes} />
                         </div>
                     </div>
+
                     <div className="flex flex-wrap items-center justify-end gap-4">
                         <Button
                             variant="outline"
@@ -367,10 +291,10 @@ export default function UnitFormSheet({
                             onClick={() => handleOpenChange(false)}
                             disabled={processing}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button disabled={processing}>
-                            {isEdit ? 'Save' : 'Create'}
+                            {t(isEdit ? 'Save' : 'Create')}
                         </Button>
                     </div>
                 </form>

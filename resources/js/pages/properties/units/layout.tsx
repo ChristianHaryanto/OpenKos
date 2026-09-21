@@ -2,6 +2,7 @@ import { Head } from '@inertiajs/react';
 import type { ReactNode } from 'react';
 import { EntityWorkspaceLayout } from '@/components/shared/entity-workspace-layout';
 import { WorkspaceTabs } from '@/components/shared/workspace-tabs';
+import properties from '@/routes/properties';
 
 import type { WorkspaceProperty, WorkspaceUnit } from '@/types';
 
@@ -9,11 +10,13 @@ export function UnitLayout({
     property,
     unit,
     activeTab,
+    actions,
     children,
 }: {
     property: WorkspaceProperty;
     unit: WorkspaceUnit;
     activeTab: string;
+    actions?: ReactNode;
     children: ReactNode;
 }) {
     const base = `/properties/${property.slug}/units/${unit.slug}`;
@@ -24,6 +27,7 @@ export function UnitLayout({
             subtitle={`${property.name} — Floor ${unit.floor ?? '—'}`}
             backRoute={`/properties/${property.slug}/units`}
             backLabel={`${property.name} units`}
+            actions={actions}
         >
             <Head title={`${unit.name} — Unit`} />
 
@@ -34,9 +38,27 @@ export function UnitLayout({
                 tabs={[
                     { key: 'overview', label: 'Overview', href: base },
                     {
+                        key: 'rates',
+                        label: 'Rates',
+                        href: `${base}/rates`,
+                    },
+                    {
+                        key: 'utilities',
+                        label: 'Utilities',
+                        href: `${base}/utilities`,
+                    },
+                    {
                         key: 'maintenance',
                         label: 'Maintenance',
                         href: `${base}/maintenance-history`,
+                    },
+                    {
+                        key: 'inspections',
+                        label: 'Inspections',
+                        href: properties.units.inspections.url({
+                            property: property.slug,
+                            unit: unit.slug,
+                        }),
                     },
                     {
                         key: 'lease-history',

@@ -54,6 +54,12 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    'build' => [
+        'version' => env('OPENKOS_BUILD_VERSION'),
+        'channel' => env('OPENKOS_BUILD_CHANNEL'),
+        'commit_sha' => env('OPENKOS_BUILD_COMMIT_SHA'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone
@@ -81,6 +87,23 @@ return [
     'locale' => env('APP_LOCALE', 'en'),
 
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
+
+    'supported_locales' => [
+        'en' => 'English',
+        'id' => 'Bahasa Indonesia',
+    ],
+
+    'locale_aliases' => [
+        'en' => 'en',
+        'en-us' => 'en',
+        'id' => 'id',
+        'id-id' => 'id',
+    ],
+
+    'intl_locales' => [
+        'en' => 'en-US',
+        'id' => 'id-ID',
+    ],
 
     'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),
 

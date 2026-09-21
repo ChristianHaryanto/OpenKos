@@ -3,12 +3,41 @@
 namespace App\Services\Settings;
 
 use App\Models\Setting;
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Support\Str;
 
 class SettingManager
 {
+    public const CACHE_GENERATION_KEY = 'openkos:settings:version';
+
+    public const CACHE_GENERATION_LOCK_KEY = 'openkos:settings:version:lock';
+
+    public const CACHE_SNAPSHOT_PREFIX = 'openkos:settings:snapshot:';
+
+    /**
+     * @var array<string, array{value: mixed, type: string}>
+     */
+    private array $storedSettings = [];
+
+    /**
+     * @var array<string, mixed>
+     */
+    private array $resolvedSettings = [];
+
+    private bool $snapshotLoaded = false;
+
+    private bool $cacheResolved = false;
+
+    private bool $cacheUnavailable = false;
+
+    private ?CacheRepository $cacheRepository = null;
+
     public function __construct(
         private SettingRegistry $registry,
         private SettingCaster $caster,
+        private CacheFactory $cacheFactory,
     ) {}
 
     public function get(?string $key = null): mixed
@@ -17,10 +46,10 @@ class SettingManager
             return $this->allWithDefaults();
         }
 
-        $setting = Setting::where('key', $key)->first();
+        $this->loadSnapshot();
 
-        if ($setting) {
-            return $setting->resolveValue();
+        if (array_key_exists($key, $this->storedSettings)) {
+            return $this->resolveStoredSetting($key);
         }
 
         $def = $this->registry->get($key);
@@ -34,10 +63,32 @@ class SettingManager
 
         $stored = $this->caster->serialize($value, $cast);
 
-        return Setting::updateOrCreate(
+        $setting = Setting::updateOrCreate(
             ['key' => $key],
             ['value' => $stored, 'type' => $cast],
         );
+
+        if ($this->snapshotLoaded) {
+            $this->storedSettings[$key] = [
+                'value' => $stored,
+                'type' => $cast,
+            ];
+            unset($this->resolvedSettings[$key]);
+        }
+
+        $connection = $setting->getConnection();
+        if ($connection->transactionLevel() > 0) {
+            $connection->afterCommit(function (): void {
+                $this->invalidatePersistentSnapshot();
+            });
+            $connection->afterRollBack(function (): void {
+                $this->forgetSnapshot();
+            });
+        } else {
+            $this->invalidatePersistentSnapshot();
+        }
+
+        return $setting;
     }
 
     public function some(array $keys): array
@@ -149,11 +200,286 @@ class SettingManager
 
     private function allWithDefaults(): array
     {
+        $this->loadSnapshot();
+
         $defaults = [];
         foreach ($this->registry->all() as $key => $def) {
             $defaults[$key] = $this->caster->serialize($def['default'], $def['cast']);
         }
 
-        return array_merge($defaults, Setting::pluck('value', 'key')->all());
+        $stored = [];
+        foreach ($this->storedSettings as $key => $setting) {
+            $stored[$key] = $setting['value'];
+        }
+
+        return array_merge($defaults, $stored);
+    }
+
+    private function loadSnapshot(): void
+    {
+        if ($this->snapshotLoaded) {
+            return;
+        }
+
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $generation = $this->currentGeneration();
+
+            if ($generation !== null) {
+                $cached = $this->readPersistentSnapshot($generation);
+
+                if ($cached !== null) {
+                    $this->storedSettings = $cached;
+                    $this->snapshotLoaded = true;
+
+                    return;
+                }
+            }
+
+            $this->loadDatabaseSnapshot();
+
+            if ($generation === null || ! $this->generationIsCurrent($generation)) {
+                if ($generation !== null && ! $this->cacheUnavailable) {
+                    $this->forgetSnapshot();
+
+                    continue;
+                }
+
+                $this->snapshotLoaded = true;
+
+                return;
+            }
+
+            $this->writePersistentSnapshot($generation);
+            $this->snapshotLoaded = true;
+
+            return;
+        }
+
+        $this->loadDatabaseSnapshot();
+        $this->snapshotLoaded = true;
+    }
+
+    private function loadDatabaseSnapshot(): void
+    {
+        $this->storedSettings = [];
+
+        foreach (Setting::query()->select(['key', 'value', 'type'])->get() as $setting) {
+            $this->storedSettings[$setting->key] = [
+                'value' => $setting->value,
+                'type' => $setting->type,
+            ];
+        }
+    }
+
+    private function currentGeneration(): ?string
+    {
+        $cache = $this->persistentCache();
+
+        if ($cache === null) {
+            return null;
+        }
+
+        try {
+            $generation = $cache->get(self::CACHE_GENERATION_KEY);
+
+            if (is_string($generation) && $generation !== '') {
+                return $generation;
+            }
+
+            if ($generation !== null) {
+                throw new \RuntimeException('Settings cache generation is malformed.');
+            }
+
+            $store = $cache->getStore();
+            if (! $store instanceof LockProvider) {
+                throw new \RuntimeException('Settings cache store does not support atomic locks.');
+            }
+
+            return $store->lock(self::CACHE_GENERATION_LOCK_KEY, 10)->block(5, function () use ($cache): string {
+                $generation = $cache->get(self::CACHE_GENERATION_KEY);
+
+                if (is_string($generation) && $generation !== '') {
+                    return $generation;
+                }
+
+                if ($generation !== null) {
+                    throw new \RuntimeException('Settings cache generation is malformed.');
+                }
+
+                $generation = (string) Str::uuid();
+
+                if (! $cache->forever(self::CACHE_GENERATION_KEY, $generation)) {
+                    throw new \RuntimeException('Settings cache generation could not be initialized.');
+                }
+
+                return $generation;
+            });
+        } catch (\Throwable $exception) {
+            $this->disablePersistentCache($exception);
+
+            return null;
+        }
+    }
+
+    /**
+     * @return array<string, array{value: mixed, type: string}>|null
+     */
+    private function readPersistentSnapshot(string $generation): ?array
+    {
+        $cache = $this->persistentCache();
+
+        if ($cache === null) {
+            return null;
+        }
+
+        try {
+            $snapshot = $cache->get($this->snapshotKey($generation));
+
+            if ($snapshot === null) {
+                return null;
+            }
+
+            if (! $this->isValidSnapshot($snapshot)) {
+                throw new \RuntimeException('Settings cache snapshot is malformed.');
+            }
+
+            return $snapshot;
+        } catch (\Throwable $exception) {
+            $this->disablePersistentCache($exception);
+
+            return null;
+        }
+    }
+
+    private function writePersistentSnapshot(string $generation): void
+    {
+        $cache = $this->persistentCache();
+
+        if ($cache === null || ! $this->generationIsCurrent($generation)) {
+            return;
+        }
+
+        try {
+            if (! $cache->put($this->snapshotKey($generation), $this->storedSettings, $this->persistentCacheTtl())) {
+                throw new \RuntimeException('Settings cache snapshot could not be written.');
+            }
+        } catch (\Throwable $exception) {
+            $this->disablePersistentCache($exception);
+        }
+    }
+
+    private function generationIsCurrent(string $generation): bool
+    {
+        $current = $this->currentGeneration();
+
+        return $current !== null && hash_equals($generation, $current);
+    }
+
+    private function invalidatePersistentSnapshot(): void
+    {
+        $cache = $this->persistentCache();
+
+        if ($cache === null) {
+            return;
+        }
+
+        try {
+            $store = $cache->getStore();
+            if (! $store instanceof LockProvider) {
+                throw new \RuntimeException('Settings cache store does not support atomic locks.');
+            }
+
+            $store->lock(self::CACHE_GENERATION_LOCK_KEY, 10)->block(5, function () use ($cache): void {
+                if (! $cache->forever(self::CACHE_GENERATION_KEY, (string) Str::uuid())) {
+                    throw new \RuntimeException('Settings cache generation could not be invalidated.');
+                }
+            });
+        } catch (\Throwable $exception) {
+            $this->disablePersistentCache($exception);
+        }
+    }
+
+    private function persistentCache(): ?CacheRepository
+    {
+        if ($this->cacheUnavailable) {
+            return null;
+        }
+
+        if ($this->cacheResolved) {
+            return $this->cacheRepository;
+        }
+
+        $this->cacheResolved = true;
+        $store = config('settings_cache.store');
+
+        if (! is_string($store) || trim($store) === '') {
+            return null;
+        }
+
+        try {
+            return $this->cacheRepository = $this->cacheFactory->store($store);
+        } catch (\Throwable $exception) {
+            $this->disablePersistentCache($exception);
+
+            return null;
+        }
+    }
+
+    private function disablePersistentCache(\Throwable $exception): void
+    {
+        if ($this->cacheUnavailable) {
+            return;
+        }
+
+        $this->cacheUnavailable = true;
+        $this->cacheRepository = null;
+        report($exception);
+    }
+
+    private function persistentCacheTtl(): int
+    {
+        return max(1, (int) config('settings_cache.ttl', 3600));
+    }
+
+    private function snapshotKey(string $generation): string
+    {
+        return self::CACHE_SNAPSHOT_PREFIX.$generation;
+    }
+
+    private function isValidSnapshot(mixed $snapshot): bool
+    {
+        if (! is_array($snapshot)) {
+            return false;
+        }
+
+        foreach ($snapshot as $key => $setting) {
+            if (
+                ! is_string($key) ||
+                ! is_array($setting) ||
+                ! array_key_exists('value', $setting) ||
+                ! is_string($setting['type'] ?? null)
+            ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function resolveStoredSetting(string $key): mixed
+    {
+        if (! array_key_exists($key, $this->resolvedSettings)) {
+            $setting = $this->storedSettings[$key];
+            $this->resolvedSettings[$key] = $this->caster->deserialize($setting['value'], $setting['type']);
+        }
+
+        return $this->resolvedSettings[$key];
+    }
+
+    private function forgetSnapshot(): void
+    {
+        $this->storedSettings = [];
+        $this->resolvedSettings = [];
+        $this->snapshotLoaded = false;
     }
 }

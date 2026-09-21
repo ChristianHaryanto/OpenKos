@@ -3,43 +3,10 @@
 use App\Services\Platform\ComposerPluginDiscovery;
 use Composer\InstalledVersions;
 use OpenKOS\Core\Contracts\PluginDiscovery;
-use OpenKOS\Platform\OpenKOSManager;
 use OpenKOS\Platform\PlatformServiceProvider;
-use OpenKOS\Platform\Plugin\Plugin;
-use OpenKOS\Platform\Plugin\PluginManifest;
-
-class ComposerDiscoveryFixturePlugin extends Plugin
-{
-    public static int $registerCalls = 0;
-
-    public function manifest(): PluginManifest
-    {
-        return new PluginManifest(
-            id: 'fixture/composer-plugin',
-            name: 'Composer Fixture',
-            version: '1.0.0',
-        );
-    }
-
-    public function register(OpenKOSManager $platform): void
-    {
-        self::$registerCalls++;
-    }
-}
-
-class ComposerDiscoverySecondFixturePlugin extends Plugin
-{
-    public function manifest(): PluginManifest
-    {
-        return new PluginManifest(
-            id: 'fixture/composer-plugin-second',
-            name: 'Composer Second Fixture',
-            version: '1.0.0',
-        );
-    }
-
-    public function register(OpenKOSManager $platform): void {}
-}
+use OpenKOS\Platform\Plugin\PluginLifecycleFailureRegistry;
+use Tests\Support\Fixtures\ComposerDiscoveryFixturePlugin;
+use Tests\Support\Fixtures\ComposerDiscoverySecondFixturePlugin;
 
 /**
  * @param  array<string, array<string, mixed>>  $packages
@@ -47,6 +14,10 @@ class ComposerDiscoverySecondFixturePlugin extends Plugin
 function withComposerDiscoveryFixtures(array $packages, Closure $callback): mixed
 {
     $original = require base_path('vendor/composer/installed.php');
+    $installedPackages = array_diff(
+        InstalledVersions::getInstalledPackages(),
+        array_keys($packages),
+    );
     $originalDisabledPackages = config('platform.discovery.disabled_packages', []);
     $versions = [];
     $directories = [];
@@ -71,6 +42,11 @@ function withComposerDiscoveryFixtures(array $packages, Closure $callback): mixe
                 'dev_requirement' => false,
             ];
         }
+
+        config(['platform.discovery.disabled_packages' => array_values(array_unique([
+            ...$originalDisabledPackages,
+            ...$installedPackages,
+        ]))]);
 
         InstalledVersions::reload([
             'root' => [
@@ -107,7 +83,7 @@ it('discovers a plugin declared by Composer metadata', function () {
         ],
     ], fn (): array => app(ComposerPluginDiscovery::class)->discover());
 
-    expect($plugins)->toContain(ComposerDiscoveryFixturePlugin::class);
+    expect($plugins)->toBe([ComposerDiscoveryFixturePlugin::class]);
 });
 
 it('ignores packages without OpenKOS plugin metadata', function () {
@@ -130,6 +106,68 @@ it('skips disabled Composer packages', function () {
     ], fn (): array => app(ComposerPluginDiscovery::class)->discover());
 
     expect($plugins)->not->toContain(ComposerDiscoveryFixturePlugin::class);
+});
+
+it('ignores Composer metadata installed inside the runtime plugin store', function () {
+    $original = require base_path('vendor/composer/installed.php');
+    $originalDisabledPackages = config('platform.discovery.disabled_packages', []);
+    $originalRuntimePath = config('platform.runtime.path');
+    $runtimeRoot = sys_get_temp_dir().'/openkos-runtime-'.bin2hex(random_bytes(8));
+    $packagePath = $runtimeRoot.'/openkos/payment-xendit';
+
+    mkdir($packagePath, 0755, true);
+    file_put_contents($packagePath.'/composer.json', json_encode([
+        'name' => 'openkos/payment-xendit',
+        'extra' => [
+            'openkos' => ['plugin' => ComposerDiscoveryFixturePlugin::class],
+        ],
+    ], JSON_THROW_ON_ERROR));
+
+    try {
+        config([
+            'platform.runtime.path' => $runtimeRoot,
+            'platform.discovery.disabled_packages' => array_values(array_unique([
+                ...$originalDisabledPackages,
+                ...array_diff(InstalledVersions::getInstalledPackages(), ['openkos/payment-xendit']),
+            ])),
+        ]);
+        InstalledVersions::reload([
+            'root' => [
+                'name' => 'openkos/openkos',
+                'pretty_version' => 'dev-test',
+                'version' => 'dev-test',
+                'reference' => null,
+                'type' => 'project',
+                'install_path' => base_path(),
+                'aliases' => [],
+                'dev' => true,
+            ],
+            'versions' => [
+                'openkos/payment-xendit' => [
+                    'pretty_version' => '0.1.6',
+                    'version' => '0.1.6.0',
+                    'reference' => null,
+                    'type' => 'library',
+                    'install_path' => $packagePath,
+                    'aliases' => [],
+                    'dev_requirement' => false,
+                ],
+            ],
+        ]);
+
+        expect(app(ComposerPluginDiscovery::class)->discoverComposerOnly())
+            ->not->toContain(ComposerDiscoveryFixturePlugin::class);
+    } finally {
+        InstalledVersions::reload($original);
+        config([
+            'platform.runtime.path' => $originalRuntimePath,
+            'platform.discovery.disabled_packages' => $originalDisabledPackages,
+        ]);
+        unlink($packagePath.'/composer.json');
+        rmdir($packagePath);
+        rmdir(dirname($packagePath));
+        rmdir($runtimeRoot);
+    }
 });
 
 it('rejects malformed OpenKOS plugin metadata', function () {
@@ -165,7 +203,7 @@ it('boots a Composer-discovered plugin through the normal lifecycle', function (
         ],
     ], function (): null {
         config(['platform.plugins' => []]);
-        (new PlatformServiceProvider(app()))->boot();
+        $this->bootPlatformWithIsolatedRegistries();
 
         return null;
     });
@@ -173,8 +211,10 @@ it('boots a Composer-discovered plugin through the normal lifecycle', function (
     expect(ComposerDiscoveryFixturePlugin::$registerCalls)->toBe(1);
 });
 
-it('does not run any plugin lifecycle when discovery finds an invalid class', function () {
+it('records an invalid discovered class and continues with healthy plugins', function () {
     ComposerDiscoveryFixturePlugin::$registerCalls = 0;
+    $this->bootPlatformWithIsolatedRegistries();
+
     app()->instance(PluginDiscovery::class, new class implements PluginDiscovery
     {
         public function discover(): array
@@ -185,10 +225,18 @@ it('does not run any plugin lifecycle when discovery finds an invalid class', fu
 
     config(['platform.plugins' => []]);
 
-    expect(fn () => (new PlatformServiceProvider(app()))->boot())
-        ->toThrow(InvalidArgumentException::class, 'Plugin class [Acme\\MissingPlugin] does not exist.');
+    (new PlatformServiceProvider(app()))->boot();
 
-    expect(ComposerDiscoveryFixturePlugin::$registerCalls)->toBe(0);
+    expect(ComposerDiscoveryFixturePlugin::$registerCalls)->toBe(1)
+        ->and(app(PluginLifecycleFailureRegistry::class)->failures())->toMatchArray([
+            [
+                'id' => null,
+                'version' => null,
+                'entry_class' => 'Acme\\MissingPlugin',
+                'phase' => 'resolve',
+                'exception' => InvalidArgumentException::class,
+            ],
+        ]);
 });
 
 it('loads discovered plugins in deterministic package order', function () {

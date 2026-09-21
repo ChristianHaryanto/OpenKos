@@ -1,4 +1,5 @@
 import { useForm, usePage } from '@inertiajs/react';
+import { useState } from 'react';
 import { InputError, PhoneInput, SearchableSelect } from '@/components/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,6 +19,8 @@ import {
     SheetTitle,
 } from '@/components/ui/sheet';
 import { Textarea } from '@/components/ui/textarea';
+import { t } from '@/lib/i18n';
+import { propertyRentalModeOptions } from '@/lib/property-rental-mode';
 import { store, update } from '@/routes/properties';
 import type { Property, PropertyTypeOption, Region } from '@/types';
 
@@ -36,6 +39,10 @@ export default function PropertyFormSheet({
     }>().props;
 
     const isEdit = Boolean(property);
+    const [hasExplicitRentalMode, setHasExplicitRentalMode] = useState(isEdit);
+    const selectedType = propertyTypes.find(
+        (option) => option.slug === (property?.type ?? propertyTypes[0]?.slug),
+    );
     const city =
         property?.city && typeof property.city !== 'string'
             ? property.city
@@ -44,11 +51,16 @@ export default function PropertyFormSheet({
     const { data, setData, submit, reset, processing, errors } = useForm({
         name: property?.name ?? '',
         type: property?.type ?? propertyTypes[0]?.slug ?? '',
+        rental_mode:
+            property?.rental_mode ??
+            selectedType?.default_rental_mode ??
+            'unit',
         address: property?.address ?? '',
         region_id: property?.region_id ?? property?.region?.id ?? null,
         city_id: property?.city_id ?? city?.id ?? null,
         postal_code: property?.postal_code ?? '',
         phone: property?.phone ?? '',
+        description: property?.description ?? '',
     });
 
     function handleOpenChange(next: boolean) {
@@ -56,6 +68,10 @@ export default function PropertyFormSheet({
 
         if (!next) {
             reset();
+
+            if (!isEdit) {
+                setHasExplicitRentalMode(false);
+            }
         }
     }
 
@@ -87,12 +103,12 @@ export default function PropertyFormSheet({
             <SheetContent className="sm:max-w-lg">
                 <SheetHeader>
                     <SheetTitle>
-                        {isEdit ? 'Edit Property' : 'New Property'}
+                        {t(isEdit ? 'Edit Property' : 'New Property')}
                     </SheetTitle>
                     <SheetDescription>
                         {isEdit
-                            ? 'Update property details'
-                            : 'Add a new property to manage'}
+                            ? t('Update property details')
+                            : t('Add a new property to manage')}
                     </SheetDescription>
                 </SheetHeader>
 
@@ -102,7 +118,7 @@ export default function PropertyFormSheet({
                 >
                     <div className="space-y-6">
                         <div className="grid gap-2">
-                            <Label htmlFor="name">Name</Label>
+                            <Label htmlFor="name">{t('Name')}</Label>
                             <Input
                                 id="name"
                                 required
@@ -110,16 +126,33 @@ export default function PropertyFormSheet({
                                 onChange={(e) =>
                                     setData('name', e.target.value)
                                 }
-                                placeholder="e.g. Kos Melati"
+                                placeholder={t('e.g. Kos Melati')}
                             />
                             <InputError message={errors.name} />
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="type">Type</Label>
+                            <Label htmlFor="type">{t('Type')}</Label>
                             <Select
                                 value={data.type}
-                                onValueChange={(v) => setData('type', v)}
+                                onValueChange={(value) => {
+                                    if (!isEdit && !hasExplicitRentalMode) {
+                                        setData((current) => ({
+                                            ...current,
+                                            type: value,
+                                            rental_mode:
+                                                propertyTypes.find(
+                                                    (option) =>
+                                                        option.slug === value,
+                                                )?.default_rental_mode ??
+                                                'unit',
+                                        }));
+
+                                        return;
+                                    }
+
+                                    setData('type', value);
+                                }}
                             >
                                 <SelectTrigger id="type" className="w-full">
                                     <SelectValue />
@@ -139,21 +172,66 @@ export default function PropertyFormSheet({
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="address">Address</Label>
+                            <Label htmlFor="rental_mode">
+                                {t('Rental model')}
+                            </Label>
+                            <Select
+                                value={data.rental_mode}
+                                onValueChange={(value) => {
+                                    setHasExplicitRentalMode(true);
+                                    setData(
+                                        'rental_mode',
+                                        value as typeof data.rental_mode,
+                                    );
+                                }}
+                            >
+                                <SelectTrigger
+                                    id="rental_mode"
+                                    className="w-full"
+                                >
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {propertyRentalModeOptions.map((option) => (
+                                        <SelectItem
+                                            key={option.value}
+                                            value={option.value}
+                                        >
+                                            {t(option.label)}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <p className="text-sm text-muted-foreground">
+                                {t(
+                                    propertyRentalModeOptions.find(
+                                        (option) =>
+                                            option.value === data.rental_mode,
+                                    )?.description ?? '',
+                                )}{' '}
+                                {t(
+                                    'This setting overrides the default rental model from the selected property type.',
+                                )}
+                            </p>
+                            <InputError message={errors.rental_mode} />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="address">{t('Address')}</Label>
                             <Textarea
                                 id="address"
                                 value={data.address}
                                 onChange={(e) =>
                                     setData('address', e.target.value)
                                 }
-                                placeholder="Property address"
+                                placeholder={t('Property address')}
                             />
                             <InputError message={errors.address} />
                         </div>
 
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                             <div className="grid gap-2">
-                                <Label>Province</Label>
+                                <Label>{t('Province')}</Label>
                                 <SearchableSelect
                                     options={regionOptions}
                                     value={data.region_id}
@@ -164,14 +242,14 @@ export default function PropertyFormSheet({
                                             city_id: null,
                                         }))
                                     }
-                                    placeholder="Select province..."
-                                    searchPlaceholder="Search province..."
-                                    emptyText="No province found."
+                                    placeholder={t('Select province...')}
+                                    searchPlaceholder={t('Search province...')}
+                                    emptyText={t('No province found.')}
                                 />
                                 <InputError message={errors.region_id} />
                             </div>
                             <div className="grid gap-2">
-                                <Label>City / Kabupaten</Label>
+                                <Label>{t('City / Kabupaten')}</Label>
                                 <SearchableSelect
                                     options={cityOptions}
                                     value={data.city_id}
@@ -180,38 +258,53 @@ export default function PropertyFormSheet({
                                     }
                                     placeholder={
                                         data.region_id
-                                            ? 'Select city...'
-                                            : 'Select province first'
+                                            ? t('Select city...')
+                                            : t('Select province first')
                                     }
-                                    searchPlaceholder="Search city..."
-                                    emptyText="No city found."
+                                    searchPlaceholder={t('Search city...')}
+                                    emptyText={t('No city found.')}
                                     disabled={!data.region_id}
                                 />
                                 <InputError message={errors.city_id} />
                             </div>
                             <div className="grid gap-2">
-                                <Label htmlFor="postal_code">Postal Code</Label>
+                                <Label htmlFor="postal_code">
+                                    {t('Postal Code')}
+                                </Label>
                                 <Input
                                     id="postal_code"
                                     value={data.postal_code}
                                     onChange={(e) =>
                                         setData('postal_code', e.target.value)
                                     }
-                                    placeholder="Postal code"
+                                    placeholder={t('Postal code')}
                                 />
                                 <InputError message={errors.postal_code} />
                             </div>
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="phone">Phone</Label>
+                            <Label htmlFor="phone">{t('Phone')}</Label>
                             <PhoneInput
                                 value={data.phone}
                                 onChange={(v) => setData('phone', v)}
-                                placeholder="e.g. 81234567890"
+                                placeholder={t('e.g. 81234567890')}
                             />
                             <InputError message={errors.phone} />
                         </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                        <Label htmlFor="description">{t('Description')}</Label>
+                        <Textarea
+                            id="description"
+                            value={data.description}
+                            onChange={(event) =>
+                                setData('description', event.target.value)
+                            }
+                            placeholder={t('Property description')}
+                        />
+                        <InputError message={errors.description} />
                     </div>
                     <div className="flex flex-wrap items-center justify-end gap-4">
                         <Button
@@ -220,10 +313,10 @@ export default function PropertyFormSheet({
                             onClick={() => handleOpenChange(false)}
                             disabled={processing}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button disabled={processing}>
-                            {isEdit ? 'Save' : 'Create'}
+                            {t(isEdit ? 'Save' : 'Create')}
                         </Button>
                     </div>
                 </form>

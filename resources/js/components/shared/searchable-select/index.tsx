@@ -10,6 +10,7 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from '@/components/ui/popover';
+import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 export type Option = {
@@ -57,15 +58,16 @@ export default function SearchableSelect({
                     role="combobox"
                     aria-expanded={open}
                     disabled={disabled}
-                    className="w-full justify-between font-normal"
+                    className="w-full max-w-full min-w-0 justify-between overflow-hidden font-normal"
                 >
-                    {selected ? (
-                        selected.label
-                    ) : (
-                        <span className="text-muted-foreground">
-                            {placeholder}
-                        </span>
-                    )}
+                    <span
+                        className={cn(
+                            'min-w-0 flex-1 truncate text-left',
+                            !selected && 'text-muted-foreground',
+                        )}
+                    >
+                        {selected ? selected.label : t(placeholder)}
+                    </span>
                     <ChevronsUpDown
                         data-icon="inline-end"
                         className="shrink-0 opacity-50"
@@ -76,7 +78,7 @@ export default function SearchableSelect({
                 <div className="flex items-center border-b px-3">
                     <SearchIcon className="mr-2 size-4 shrink-0 opacity-50" />
                     <Input
-                        placeholder={searchPlaceholder}
+                        placeholder={t(searchPlaceholder)}
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -88,7 +90,7 @@ export default function SearchableSelect({
                 >
                     {filtered.length === 0 ? (
                         <div className="py-6 text-center text-sm text-muted-foreground">
-                            {emptyText}
+                            {t(emptyText)}
                         </div>
                     ) : (
                         filtered.map((option) => (
@@ -96,7 +98,7 @@ export default function SearchableSelect({
                                 key={option.value}
                                 type="button"
                                 className={cn(
-                                    'relative flex w-full cursor-default items-center gap-2 rounded-sm px-2 py-1.5 pr-8 text-sm outline-hidden select-none hover:bg-accent hover:text-accent-foreground',
+                                    'relative flex w-full min-w-0 cursor-default items-center gap-2 rounded-sm px-2 py-1.5 pr-8 text-sm outline-hidden select-none hover:bg-accent hover:text-accent-foreground',
                                     String(value) === String(option.value) &&
                                         'bg-accent text-accent-foreground',
                                 )}
@@ -117,7 +119,9 @@ export default function SearchableSelect({
                                             : 'opacity-0',
                                     )}
                                 />
-                                {option.label}
+                                <span className="min-w-0 truncate">
+                                    {option.label}
+                                </span>
                             </button>
                         ))
                     )}

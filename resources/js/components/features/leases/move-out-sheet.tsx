@@ -1,4 +1,4 @@
-import { useForm } from '@inertiajs/react';
+import { useForm, usePage } from '@inertiajs/react';
 import { useMemo, useState } from 'react';
 import { InputError, SearchableSelect } from '@/components/shared';
 import { Button } from '@/components/ui/button';
@@ -20,8 +20,21 @@ import {
 } from '@/components/ui/sheet';
 import { Textarea } from '@/components/ui/textarea';
 import { todayISO } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import leases from '@/routes/leases';
 import type { AvailableUnit, LeaseData } from '@/types';
+import DepositSettlementFields, {
+    emptyDepositSettlementForm,
+} from './deposit-settlement-fields';
+import type { DepositSettlementFormData } from './deposit-settlement-fields';
+
+type MoveOutFormData = {
+    move_out_date: string;
+    reason: string;
+    deposit_refund_amount: string;
+    notes: string;
+    settlement: DepositSettlementFormData | null;
+};
 
 const REASONS = [
     { value: 'contract_ended', label: 'Contract ended' },
@@ -44,15 +57,19 @@ export default function MoveOutSheet({
     onOpenChange: (open: boolean) => void;
     onClose?: () => void;
 }) {
+    const { setting } = usePage<{ setting: { currency: string } }>().props;
+    const currency = lease?.currency ?? setting.currency;
     const { data, setData, transform, submit, reset, processing, errors } =
-        useForm({
+        useForm<MoveOutFormData>({
             move_out_date: todayISO(),
             reason: '',
             deposit_refund_amount: '',
             notes: '',
+            settlement: null,
         });
 
     const [depositReturned, setDepositReturned] = useState<string | null>(null);
+    const [settlementEnabled, setSettlementEnabled] = useState(false);
     const [moveToAnotherUnit, setMoveToAnotherUnit] = useState(false);
     const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(
         null,
@@ -70,7 +87,11 @@ export default function MoveOutSheet({
                 move_to_another_unit: moveToAnotherUnit ? '1' : '0',
             };
 
-            if (depositReturned !== 'yes') {
+            if (settlementEnabled && d.settlement) {
+                payload.settlement = d.settlement;
+                delete payload.deposit_returned;
+                delete payload.deposit_refund_amount;
+            } else if (depositReturned !== 'yes') {
                 delete payload.deposit_refund_amount;
             }
 
@@ -140,6 +161,7 @@ export default function MoveOutSheet({
         if (!next) {
             reset();
             setDepositReturned(null);
+            setSettlementEnabled(false);
             setMoveToAnotherUnit(false);
             setSelectedPropertyId(null);
             setSelectedTargetUnitId(null);
@@ -154,18 +176,24 @@ export default function MoveOutSheet({
     const tenantName =
         lease?.primary_tenant?.name ?? lease?.tenants?.[0]?.name ?? 'Unknown';
     const tenantList = lease?.tenants ?? [];
-    const unitLabel = lease?.unit?.name ?? 'Unknown';
+    const unitLabel =
+        lease?.target_type === 'whole_property'
+            ? (lease.property?.name ?? t('Entire property'))
+            : (lease?.unit?.name ?? 'Unknown');
+    const canMoveToAnotherUnit = lease?.target_type !== 'whole_property';
     const isCurrentlyOccupied = Boolean(lease);
 
     if (!isCurrentlyOccupied) {
         return null;
     }
 
+    const currentLease = lease!;
+
     return (
         <Sheet open={open} onOpenChange={handleOpenChange}>
             <SheetContent className="sm:max-w-lg">
                 <SheetHeader>
-                    <SheetTitle>Move Out Tenant</SheetTitle>
+                    <SheetTitle>{t('Move Out Tenant')}</SheetTitle>
                     <SheetDescription>
                         {tenantName} · {unitLabel}
                     </SheetDescription>
@@ -208,7 +236,9 @@ export default function MoveOutSheet({
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="move_out_date">Move-out Date</Label>
+                            <Label htmlFor="move_out_date">
+                                {t('Move-out Date')}
+                            </Label>
                             <Input
                                 id="move_out_date"
                                 type="date"
@@ -222,13 +252,17 @@ export default function MoveOutSheet({
                         </div>
 
                         <div className="grid gap-2">
-                            <Label htmlFor="reason">Reason</Label>
+                            <Label htmlFor="reason">{t('Reason')}</Label>
                             <Select
                                 value={data.reason}
                                 onValueChange={(v) => setData('reason', v)}
                             >
                                 <SelectTrigger>
-                                    <SelectValue placeholder="Select reason (optional)" />
+                                    <SelectValue
+                                        placeholder={t(
+                                            'Select reason (optional)',
+                                        )}
+                                    />
                                 </SelectTrigger>
                                 <SelectContent>
                                     {REASONS.map((r) => (
@@ -236,7 +270,7 @@ export default function MoveOutSheet({
                                             key={r.value}
                                             value={r.value}
                                         >
-                                            {r.label}
+                                            {t(r.label)}
                                         </SelectItem>
                                     ))}
                                 </SelectContent>
@@ -244,95 +278,198 @@ export default function MoveOutSheet({
                             <InputError message={errors.reason} />
                         </div>
 
-                        <div className="grid gap-2">
-                            <Label>Deposit Returned?</Label>
-                            <div className="flex items-center gap-4">
-                                <label className="flex items-center gap-2 text-sm">
-                                    <input
-                                        type="radio"
-                                        name="deposit_returned_radio"
-                                        checked={depositReturned === 'yes'}
-                                        onChange={() =>
-                                            setDepositReturned('yes')
+                        {!settlementEnabled && (
+                            <>
+                                <div className="grid gap-2">
+                                    <Label>{t('Deposit Returned?')}</Label>
+                                    <div className="flex items-center gap-4">
+                                        <label className="flex items-center gap-2 text-sm">
+                                            <input
+                                                type="radio"
+                                                name="deposit_returned_radio"
+                                                checked={
+                                                    depositReturned === 'yes'
+                                                }
+                                                onChange={() =>
+                                                    setDepositReturned('yes')
+                                                }
+                                                className="size-4"
+                                            />
+                                            {t('Yes')}
+                                        </label>
+                                        <label className="flex items-center gap-2 text-sm">
+                                            <input
+                                                type="radio"
+                                                name="deposit_returned_radio"
+                                                checked={
+                                                    depositReturned === 'no'
+                                                }
+                                                onChange={() =>
+                                                    setDepositReturned('no')
+                                                }
+                                                className="size-4"
+                                            />
+                                            {t('No')}
+                                        </label>
+                                    </div>
+                                    <InputError
+                                        message={
+                                            (errors as Record<string, string>)
+                                                .deposit_returned
                                         }
-                                        className="size-4"
                                     />
-                                    Yes
-                                </label>
-                                <label className="flex items-center gap-2 text-sm">
-                                    <input
-                                        type="radio"
-                                        name="deposit_returned_radio"
-                                        checked={depositReturned === 'no'}
-                                        onChange={() =>
-                                            setDepositReturned('no')
-                                        }
-                                        className="size-4"
-                                    />
-                                    No
-                                </label>
-                            </div>
-                            <InputError
-                                message={
-                                    (errors as Record<string, string>)
-                                        .deposit_returned
-                                }
-                            />
-                        </div>
+                                </div>
 
-                        {depositReturned === 'yes' && (
-                            <div className="grid gap-2">
-                                <Label htmlFor="deposit_refund_amount">
-                                    Refund Amount (IDR)
-                                </Label>
-                                <Input
-                                    id="deposit_refund_amount"
-                                    type="number"
-                                    min={0}
-                                    value={data.deposit_refund_amount}
-                                    onChange={(e) =>
-                                        setData(
-                                            'deposit_refund_amount',
-                                            e.target.value,
-                                        )
-                                    }
-                                    placeholder="Leave empty for full deposit"
-                                />
-                                <InputError
-                                    message={errors.deposit_refund_amount}
-                                />
-                            </div>
+                                {depositReturned === 'yes' && (
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="deposit_refund_amount">
+                                            {t('Refund Amount')} ({currency})
+                                        </Label>
+                                        <Input
+                                            id="deposit_refund_amount"
+                                            type="number"
+                                            min={0}
+                                            value={data.deposit_refund_amount}
+                                            onChange={(e) =>
+                                                setData(
+                                                    'deposit_refund_amount',
+                                                    e.target.value,
+                                                )
+                                            }
+                                            placeholder={t(
+                                                'Leave empty for full deposit',
+                                            )}
+                                        />
+                                        <InputError
+                                            message={
+                                                errors.deposit_refund_amount
+                                            }
+                                        />
+                                    </div>
+                                )}
+                            </>
                         )}
 
                         <label className="flex items-start gap-3 rounded-md border p-3 text-sm">
                             <input
                                 type="checkbox"
-                                checked={moveToAnotherUnit}
-                                onChange={(e) => {
-                                    setMoveToAnotherUnit(e.target.checked);
-
-                                    if (!e.target.checked) {
-                                        setSelectedPropertyId(null);
-                                        setSelectedTargetUnitId(null);
-                                    }
+                                checked={settlementEnabled}
+                                disabled={moveToAnotherUnit}
+                                onChange={(event) => {
+                                    const enabled = event.target.checked;
+                                    setSettlementEnabled(enabled);
+                                    setData(
+                                        'settlement',
+                                        enabled
+                                            ? emptyDepositSettlementForm(
+                                                  currentLease.deposit_amount,
+                                              )
+                                            : null,
+                                    );
                                 }}
                                 className="mt-0.5 size-4"
                             />
                             <div>
                                 <span className="font-medium">
-                                    Moving to another unit?
+                                    {t('Create deposit settlement now?')}
                                 </span>
                                 <p className="text-xs text-muted-foreground">
-                                    Terminate this lease and create a new one in
-                                    a different unit. Deposit carries forward.
+                                    {t(
+                                        'Optional. Save a draft or settle the deposit as part of move-out.',
+                                    )}
                                 </p>
                             </div>
                         </label>
 
-                        {moveToAnotherUnit && (
+                        {settlementEnabled && data.settlement && (
+                            <div className="space-y-3">
+                                <div className="grid gap-2">
+                                    <Label>{t('Settlement Status')}</Label>
+                                    <Select
+                                        value={data.settlement.status}
+                                        onValueChange={(value) =>
+                                            setData('settlement', {
+                                                ...data.settlement!,
+                                                status: value as
+                                                    | 'draft'
+                                                    | 'settled',
+                                            })
+                                        }
+                                    >
+                                        <SelectTrigger>
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="draft">
+                                                {t('Draft')}
+                                            </SelectItem>
+                                            <SelectItem value="settled">
+                                                {t('Settled')}
+                                            </SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                    <InputError
+                                        message={
+                                            (errors as Record<string, string>)[
+                                                'settlement.status'
+                                            ]
+                                        }
+                                    />
+                                </div>
+                                <DepositSettlementFields
+                                    value={data.settlement}
+                                    originalAmount={currentLease.deposit_amount}
+                                    currency={currency}
+                                    errors={
+                                        errors as Record<
+                                            string,
+                                            string | undefined
+                                        >
+                                    }
+                                    onChange={(settlement) =>
+                                        setData('settlement', settlement)
+                                    }
+                                />
+                            </div>
+                        )}
+
+                        {canMoveToAnotherUnit && (
+                            <label className="flex items-start gap-3 rounded-md border p-3 text-sm">
+                                <input
+                                    type="checkbox"
+                                    checked={moveToAnotherUnit}
+                                    onChange={(e) => {
+                                        setMoveToAnotherUnit(e.target.checked);
+
+                                        if (e.target.checked) {
+                                            setSettlementEnabled(false);
+                                            setData('settlement', null);
+                                        }
+
+                                        if (!e.target.checked) {
+                                            setSelectedPropertyId(null);
+                                            setSelectedTargetUnitId(null);
+                                        }
+                                    }}
+                                    className="mt-0.5 size-4"
+                                />
+                                <div>
+                                    <span className="font-medium">
+                                        {t('Moving to another unit?')}
+                                    </span>
+                                    <p className="text-xs text-muted-foreground">
+                                        {t(
+                                            'Terminate this lease and create a new one in a different unit. Deposit carries forward.',
+                                        )}
+                                    </p>
+                                </div>
+                            </label>
+                        )}
+
+                        {canMoveToAnotherUnit && moveToAnotherUnit && (
                             <div className="space-y-3 rounded-md border p-3">
                                 <div className="grid gap-2">
-                                    <Label>Property</Label>
+                                    <Label>{t('Property')}</Label>
                                     <SearchableSelect
                                         options={propertyOptions.map((p) => ({
                                             value: p.propertyId,
@@ -340,14 +477,16 @@ export default function MoveOutSheet({
                                         }))}
                                         value={selectedPropertyId}
                                         onChange={handlePropertyChange}
-                                        placeholder="Select property..."
-                                        searchPlaceholder="Search property..."
-                                        emptyText="No available units."
+                                        placeholder={t('Select property...')}
+                                        searchPlaceholder={t(
+                                            'Search property...',
+                                        )}
+                                        emptyText={t('No available units.')}
                                     />
                                 </div>
 
                                 <div className="grid gap-2">
-                                    <Label>Target Unit</Label>
+                                    <Label>{t('Target Unit')}</Label>
                                     <SearchableSelect
                                         key={selectedPropertyId ?? 'none'}
                                         options={targetUnitOptions}
@@ -359,11 +498,11 @@ export default function MoveOutSheet({
                                         }
                                         placeholder={
                                             selectedPropertyId
-                                                ? 'Select unit...'
-                                                : 'Choose a property first'
+                                                ? t('Select unit...')
+                                                : t('Choose a property first')
                                         }
-                                        searchPlaceholder="Search unit..."
-                                        emptyText="No available units."
+                                        searchPlaceholder={t('Search unit...')}
+                                        emptyText={t('No available units.')}
                                         disabled={!selectedPropertyId}
                                     />
                                     <InputError
@@ -377,14 +516,14 @@ export default function MoveOutSheet({
                         )}
 
                         <div className="grid gap-2">
-                            <Label htmlFor="notes">Notes</Label>
+                            <Label htmlFor="notes">{t('Notes')}</Label>
                             <Textarea
                                 id="notes"
                                 value={data.notes}
                                 onChange={(e) =>
                                     setData('notes', e.target.value)
                                 }
-                                placeholder="Additional notes"
+                                placeholder={t('Additional notes')}
                             />
                             <InputError message={errors.notes} />
                         </div>
@@ -396,9 +535,9 @@ export default function MoveOutSheet({
                             onClick={handleClose}
                             disabled={processing}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
-                        <Button disabled={processing}>Move Out</Button>
+                        <Button disabled={processing}>{t('Move Out')}</Button>
                     </div>
                 </form>
             </SheetContent>

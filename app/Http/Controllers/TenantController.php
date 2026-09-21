@@ -3,10 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Actions\Leases\CreateLease;
+use App\Actions\Tenants\CreateTenant;
 use App\Actions\Tenants\DisableTenantAccess;
 use App\Actions\Tenants\InviteTenant;
 use App\Data\Lease\CreateLeaseData;
-use App\Enums\LeaseStatus;
+use App\Enums\Permission;
 use App\Enums\TenantDocumentType;
 use App\Http\Requests\Tenant\AssignUnitRequest;
 use App\Http\Requests\Tenant\InviteTenantRequest;
@@ -14,6 +15,8 @@ use App\Http\Requests\Tenant\StoreTenantRequest;
 use App\Http\Requests\Tenant\UpdateTenantRequest;
 use App\Models\Tenant;
 use App\Models\Unit;
+use App\Services\Pricing\EffectiveUnitRateResolver;
+use App\Support\DelimitedValues;
 use App\Tables\Column;
 use App\Tables\Filter;
 use App\Tables\Table;
@@ -32,10 +35,10 @@ class TenantController extends Controller
 
         $tenant->load([
             'user:id,email,email_verified_at,last_login_at,is_active,invited_at',
-            'documents',
-            'leases' => fn ($q) => $q->where('status', 'active')
-                ->with(['unit.property', 'tenants:id,name,phone', 'primaryTenant:id,name,phone']),
-        ])->loadCount(['leases as active_leases_count' => fn ($q) => $q->where('status', 'active')]);
+            'documents.media',
+            'leases' => fn ($q) => $q->active()
+                ->with(['property', 'unit', 'tenants:id,name,phone', 'primaryTenant:id,name,phone']),
+        ])->loadCount(['leases as active_leases_count' => fn ($q) => $q->active()]);
 
         return Inertia::render('tenants/show', [
             'tenant' => $tenant,
@@ -65,7 +68,7 @@ class TenantController extends Controller
             ->defaultSort('-start_date');
 
         $result = $table->paginate(
-            $tenant->leases()->with(['unit.property', 'tenants:id,name,phone', 'primaryTenant:id,name,phone']),
+            $tenant->leases()->with(['property', 'unit', 'tenants:id,name,phone', 'primaryTenant:id,name,phone']),
             $request,
             'leases',
         );
@@ -92,7 +95,7 @@ class TenantController extends Controller
             ])
             ->defaultSort('-created_at');
 
-        $result = $table->paginate($tenant->documents(), $request, 'documents');
+        $result = $table->paginate($tenant->documents()->with('media'), $request, 'documents');
 
         return Inertia::render('tenants/documents', [
             ...$result,
@@ -102,28 +105,25 @@ class TenantController extends Controller
 
     private function workspaceTenant(Tenant $tenant): Tenant
     {
-        return $tenant->loadCount(['leases as active_leases_count' => fn ($q) => $q->where('status', 'active')]);
+        return $tenant->loadCount(['leases as active_leases_count' => fn ($q) => $q->active()]);
     }
 
     public function index(Request $request): Response
     {
+        $statusValues = DelimitedValues::normalize($request->query('status'));
+        $includeSensitiveSearch = $request->user()->isOwner()
+            || $request->user()->can(Permission::TenantsExportSensitive->value);
+
         $table = Table::make()
             ->columns([
-                Column::make('name', 'Name')->sortable()->searchable(function (Builder $q, string $search): void {
-                    $q->where(DB::raw('lower(name)'), 'like', '%'.mb_strtolower($search).'%')
-                        ->orWhere(DB::raw('lower(phone)'), 'like', '%'.mb_strtolower($search).'%')
-                        ->orWhere(DB::raw('lower(id_card_number)'), 'like', '%'.mb_strtolower($search).'%');
-                }),
+                Column::make('name', 'Name')->sortable()->searchable(
+                    fn (Builder $q, string $search) => $q->listSearch($search, $includeSensitiveSearch),
+                ),
                 Column::make('phone', 'Phone')->sortable(),
             ])
             ->filters([
                 Filter::select('status', 'Status', ['active', 'inactive', 'archived'])
-                    ->query(fn (Builder $q, string $value) => match ($value) {
-                        'active' => $q->where('is_active', true),
-                        'inactive' => $q->where('is_active', false),
-                        'archived' => $q->onlyTrashed(),
-                        default => $q,
-                    }),
+                    ->query(fn (Builder $q, string $value) => $q->statusFilter($value)),
                 Filter::select('app_access', 'App Access', [
                     ['value' => 'active', 'label' => 'Has access'],
                     ['value' => 'invited', 'label' => 'Invite pending'],
@@ -132,25 +132,7 @@ class TenantController extends Controller
                     ['value' => 'none', 'label' => 'No access'],
                 ])
                     // Buckets mirror appAccessStatus() on the frontend.
-                    ->query(fn (Builder $q, string $value) => match ($value) {
-                        'none' => $q->whereNull('user_id'),
-                        'active' => $q->whereHas('user', fn (Builder $u) => $u
-                            ->where('is_active', true)
-                            ->whereNotNull('email_verified_at')),
-                        'invited' => $q->whereHas('user', fn (Builder $u) => $u
-                            ->whereNotNull('invited_at')
-                            ->where(fn (Builder $a) => $a
-                                ->where('is_active', false)
-                                ->orWhereNull('email_verified_at'))),
-                        'disabled' => $q->whereHas('user', fn (Builder $u) => $u
-                            ->where('is_active', false)
-                            ->whereNull('invited_at')
-                            ->whereNotNull('email_verified_at')),
-                        'email_only' => $q->whereHas('user', fn (Builder $u) => $u
-                            ->whereNull('invited_at')
-                            ->whereNull('email_verified_at')),
-                        default => $q,
-                    }),
+                    ->query(fn (Builder $q, string $value) => $q->appAccessFilter($value)),
             ])
             ->defaultSort('name');
 
@@ -159,23 +141,38 @@ class TenantController extends Controller
             : null;
 
         $query = Tenant::query()
-            ->with(['user:id,email,email_verified_at,last_login_at,is_active,invited_at', 'documents', 'leases' => fn ($q) => $q->where('status', 'active')->with(['unit.property', 'tenants:id,name,phone', 'primaryTenant:id,name,phone'])])
-            ->withCount(['leases as active_leases_count' => fn ($q) => $q->where('status', 'active')])
+            ->when($statusValues !== [] && in_array('archived', $statusValues, true), fn (Builder $q) => $q->withTrashed())
+            ->with(['user:id,email,email_verified_at,last_login_at,is_active,invited_at', 'documents.media', 'leases' => fn ($q) => $q->active()->with(['property', 'unit', 'tenants:id,name,phone', 'primaryTenant:id,name,phone'])])
+            ->withCount(['leases as active_leases_count' => fn ($q) => $q->active()])
             ->when($assignedPropertyIds !== null, fn (Builder $q) => $q->whereHas(
                 'leases',
-                fn (Builder $q) => $q->whereHas('unit', fn (Builder $q) => $q->whereIn('property_id', $assignedPropertyIds)),
+                fn (Builder $q) => $q->whereIn('property_id', $assignedPropertyIds),
             ));
 
         $result = $table->paginate($query, $request, 'tenants');
 
         $availableUnits = Unit::query()
-            ->with(['property.city', 'activeRates'])
+            ->with([
+                'property.city',
+                'activeRates',
+                'unitType.activeRates',
+                'leases' => fn ($q) => $q->active(),
+            ])
             ->select(['id', 'slug', 'name', 'property_id', 'capacity'])
             ->withOccupiedCount()
             ->availableForAssignment()
+            ->whereHas('property', fn (Builder $query) => $query->supportsUnitInventory())
             ->when($assignedPropertyIds !== null, fn (Builder $q) => $q->whereIn('property_id', $assignedPropertyIds))
             ->orderBy('name')
             ->get();
+
+        $availableUnits->each(fn (Unit $unit) => $unit->setAttribute(
+            'effective_rates',
+            app(EffectiveUnitRateResolver::class)->resolve($unit)->map(fn (array $item): array => [
+                ...$item['rate']->toArray(),
+                'source' => $item['source'],
+            ])->values(),
+        ));
 
         return Inertia::render('tenants/index', [
             ...$result,
@@ -204,6 +201,7 @@ class TenantController extends Controller
             billingUnit: $validated['billing_unit'] ?? null,
             billingStrategy: $validated['billing_strategy'] ?? null,
             unitRateId: $validated['unit_rate_id'] ?? null,
+            unitTypeRateId: $validated['unit_type_rate_id'] ?? null,
             depositAmount: $validated['deposit_amount'] ?? null,
             depositPaidAt: $validated['deposit_paid_at'] ?? null,
             depositRefundAmount: null,
@@ -219,10 +217,10 @@ class TenantController extends Controller
         return back();
     }
 
-    public function store(StoreTenantRequest $request, InviteTenant $invite): RedirectResponse
+    public function store(StoreTenantRequest $request, InviteTenant $invite, CreateTenant $createTenant): RedirectResponse
     {
-        $tenant = DB::transaction(function () use ($request, $invite) {
-            $tenant = Tenant::create($request->safe()->except(['email', 'send_invite']));
+        $tenant = DB::transaction(function () use ($request, $invite, $createTenant) {
+            $tenant = $createTenant->execute($request->safe()->except(['email', 'send_invite']));
 
             if ($email = $request->validated('email')) {
                 $invite->execute($tenant, $email, $request->boolean('send_invite'));
@@ -341,7 +339,7 @@ class TenantController extends Controller
             // Fixing this would require CreateLease to also lock tenant rows.
             $locked = Tenant::lockForUpdate()->findOrFail($tenant->id);
 
-            if ($locked->leases()->where('status', LeaseStatus::Active)->exists()) {
+            if ($locked->leases()->active()->exists()) {
                 return false;
             }
 

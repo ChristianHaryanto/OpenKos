@@ -23,18 +23,27 @@ enum Permission: string
     case PropertiesCreate = 'properties.create';
     case PropertiesUpdate = 'properties.update';
     case PropertiesDelete = 'properties.delete';
+    case PropertiesImport = 'properties.import';
+    case PropertiesExport = 'properties.export';
 
     case UnitsView = 'units.view';
     case UnitsCreate = 'units.create';
     case UnitsUpdate = 'units.update';
     case UnitsDelete = 'units.delete';
+    case UnitsImport = 'units.import';
+    case UnitsExport = 'units.export';
 
     case TenantsView = 'tenants.view';
     case TenantsCreate = 'tenants.create';
     case TenantsUpdate = 'tenants.update';
     case TenantsDelete = 'tenants.delete';
+    case TenantsImport = 'tenants.import';
     case TenantsExport = 'tenants.export';
+    case TenantsExportSensitive = 'tenants.export_sensitive';
     case TenantsInvite = 'tenants.invite';
+
+    case UnitRatesImport = 'unit-rates.import';
+    case UnitRatesExport = 'unit-rates.export';
 
     case LeasesView = 'leases.view';
     case LeasesCreate = 'leases.create';
@@ -52,11 +61,24 @@ enum Permission: string
     case FinancialsView = 'financials.view';
     case ReportsView = 'reports.view';
 
+    case ExpensesView = 'expenses.view';
+    case ExpensesCreate = 'expenses.create';
+    case ExpensesUpdate = 'expenses.update';
+    case ExpensesDelete = 'expenses.delete';
+    case ExpensesImport = 'expenses.import';
+    case ExpensesExport = 'expenses.export';
+
     case MaintenanceTicketsView = 'maintenance-tickets.view';
     case MaintenanceTicketsCreate = 'maintenance-tickets.create';
     case MaintenanceTicketsUpdate = 'maintenance-tickets.update';
     case MaintenanceTicketsDelete = 'maintenance-tickets.delete';
     case MaintenanceTicketsAssign = 'maintenance-tickets.assign';
+
+    case InspectionsView = 'inspections.view';
+    case InspectionsCreate = 'inspections.create';
+    case InspectionsUpdate = 'inspections.update';
+    case InspectionsComplete = 'inspections.complete';
+    case InspectionTemplatesManage = 'inspection-templates.manage';
 
     public function label(): string
     {
@@ -71,6 +93,8 @@ enum Permission: string
             'reset_password' => 'Reset Password',
             'resend_invitation' => 'Resend Invitation',
             'export' => 'Export',
+            'import' => 'Import',
+            'export_sensitive' => 'Export Sensitive Data',
             'invite' => 'Invite',
             'move' => 'Move Unit',
             'move_out' => 'Move Out',
@@ -78,6 +102,8 @@ enum Permission: string
             'send' => 'Send',
             'clone' => 'Clone',
             'assign' => 'Assign',
+            'complete' => 'Complete',
+            'manage' => 'Manage',
             default => $action,
         };
     }
@@ -104,18 +130,27 @@ enum Permission: string
             self::PropertiesCreate => 'Add new properties.',
             self::PropertiesUpdate => 'Edit existing property information.',
             self::PropertiesDelete => 'Archive properties.',
+            self::PropertiesImport => 'Import new properties from CSV files.',
+            self::PropertiesExport => 'Export property data to CSV files.',
 
             self::UnitsView => 'View units within properties.',
             self::UnitsCreate => 'Add new units to properties.',
             self::UnitsUpdate => 'Edit existing unit details.',
             self::UnitsDelete => 'Remove units from properties.',
+            self::UnitsImport => 'Import new units from CSV files.',
+            self::UnitsExport => 'Export unit data to CSV files.',
 
             self::TenantsView => 'View the tenant list and details.',
             self::TenantsCreate => 'Register new tenants.',
             self::TenantsUpdate => 'Edit existing tenant information.',
             self::TenantsDelete => 'Archive tenant records.',
-            self::TenantsExport => 'Export tenant data.',
+            self::TenantsImport => 'Import new tenant master data from CSV files.',
+            self::TenantsExport => 'Export ordinary tenant data to CSV files.',
+            self::TenantsExportSensitive => 'Export sensitive tenant identifiers to CSV files.',
             self::TenantsInvite => 'Invite tenants to access the app.',
+
+            self::UnitRatesImport => 'Import new unit rates from CSV files.',
+            self::UnitRatesExport => 'Export unit rates to CSV files.',
 
             self::LeasesView => 'View lease agreements and history.',
             self::LeasesCreate => 'Create new leases and assign tenants to units.',
@@ -131,11 +166,24 @@ enum Permission: string
             self::FinancialsView => 'View financial reports and payment data.',
             self::ReportsView => 'Access generated reports.',
 
+            self::ExpensesView => 'View operating expenses.',
+            self::ExpensesCreate => 'Record operating expenses.',
+            self::ExpensesUpdate => 'Edit operating expenses.',
+            self::ExpensesDelete => 'Void operating expenses.',
+            self::ExpensesImport => 'Import operating expenses from CSV files.',
+            self::ExpensesExport => 'Export operating expenses to CSV files.',
+
             self::MaintenanceTicketsView => 'View the maintenance ticket list.',
             self::MaintenanceTicketsCreate => 'Report new maintenance issues.',
             self::MaintenanceTicketsUpdate => 'Update existing maintenance ticket details.',
             self::MaintenanceTicketsDelete => 'Delete maintenance tickets.',
             self::MaintenanceTicketsAssign => 'Assign maintenance tickets to staff.',
+
+            self::InspectionsView => 'View inspection history and completed inspections.',
+            self::InspectionsCreate => 'Create property, unit, and lease inspections.',
+            self::InspectionsUpdate => 'Update draft inspection details and checklist items.',
+            self::InspectionsComplete => 'Complete and lock an inspection record.',
+            self::InspectionTemplatesManage => 'Create, edit, and deactivate inspection templates.',
         };
     }
 

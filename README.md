@@ -65,6 +65,9 @@ npm run dev                            # Vite dev server with HMR
 php artisan test --compact
 ```
 
+Load-test fixture setup and persona assumptions are documented in
+[docs/load-testing.md](docs/load-testing.md).
+
 ## Plugin Development
 
 OpenKOS has a plugin system that lets you register navigation items, dashboard pages, workspace tabs, settings pages, notification drivers, and payment gateways — all from a single plugin class without modifying core.
@@ -85,7 +88,9 @@ Key decisions are recorded as Architecture Decision Records (ADRs) in [`docs/arc
 
 ## Contributing
 
-- **Report bugs & feature requests** — [Linear issue tracker](https://linear.app/openkos/issues)
+- **Contribution guide** — read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request
+- **Code of Conduct** — read the [Contributor Covenant](CODE_OF_CONDUCT.md) before participating
+- **Report bugs & feature requests** — open an issue with a clear reproduction or proposal
 - **Architecture changes** — include an ADR for decisions with lasting trade-offs (see ADR template and process in [`docs/architecture/adr/README.md`](docs/architecture/adr/README.md))
 - **Plugin developers** — see [Plugin Development](#plugin-development) and [docs/platform.md](docs/platform.md)
 

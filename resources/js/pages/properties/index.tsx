@@ -1,8 +1,7 @@
-import { Head, router } from '@inertiajs/react';
+import { Head, router, usePage } from '@inertiajs/react';
 import {
     EllipsisVertical,
     ExternalLink,
-    Eye,
     Pencil,
     RotateCcw,
     Trash2,
@@ -12,7 +11,8 @@ import { DataTable } from '@/components/data-table';
 import type { TableColumn } from '@/components/data-table';
 import { FilterBar } from '@/components/data-table/filter-bar';
 import { SearchInput } from '@/components/data-table/search-input';
-import { PropertyDetailSheet, PropertyFormSheet } from '@/components/features';
+import { PropertyFormSheet } from '@/components/features';
+import { EntityTransferMenu } from '@/components/features/data-transfer/transfer-actions';
 import { Heading } from '@/components/shared';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { Badge } from '@/components/ui/badge';
@@ -32,14 +32,20 @@ import {
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useTable } from '@/hooks/use-table';
+import { t } from '@/lib/i18n';
+import {
+    propertyRentalModeOptions,
+    supportsUnitInventory,
+} from '@/lib/property-rental-mode';
 import properties from '@/routes/properties';
-import type { ManagedProperty, PaginatedData, TableMeta } from '@/types';
+import type { Auth, ManagedProperty, PaginatedData, TableMeta } from '@/types';
 
 type PageProps = {
     properties: PaginatedData<ManagedProperty>;
     sort?: string;
     search?: string;
     status?: string;
+    type?: string;
     per_page?: number;
     table: TableMeta;
     regions: {
@@ -54,14 +60,13 @@ export default function Index({
     sort: currentSort = 'name',
     search: currentSearch = '',
     status: currentStatus = '',
+    type: currentType = '',
     per_page: currentPerPage = 15,
     table: tableMeta,
 }: PageProps) {
+    const { auth } = usePage<{ auth: Auth }>().props;
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingProperty, setEditingProperty] =
-        useState<ManagedProperty | null>(null);
-    const [detailOpen, setDetailOpen] = useState(false);
-    const [viewingProperty, setViewingProperty] =
         useState<ManagedProperty | null>(null);
     const [archiveConfirm, setArchiveConfirm] =
         useState<ManagedProperty | null>(null);
@@ -73,6 +78,7 @@ export default function Index({
             search: currentSearch,
             per_page: String(currentPerPage),
             status: currentStatus,
+            type: currentType,
         },
         defaults: {
             sort: 'name',
@@ -87,21 +93,6 @@ export default function Index({
 
     function openEdit(property: ManagedProperty) {
         setEditingProperty(property);
-        setDialogOpen(true);
-    }
-
-    function openDetail(property: ManagedProperty) {
-        setViewingProperty(property);
-        setDetailOpen(true);
-    }
-
-    function editFromDetail() {
-        if (!viewingProperty) {
-            return;
-        }
-
-        setEditingProperty(viewingProperty);
-        setDetailOpen(false);
         setDialogOpen(true);
     }
 
@@ -125,46 +116,72 @@ export default function Index({
     const columns: TableColumn<ManagedProperty>[] = [
         {
             key: 'name',
-            label: 'Name',
+            label: t('Name'),
             sortable: true,
             className: 'font-medium',
         },
         {
             key: 'type',
-            label: 'Type',
+            label: t('Type'),
             sortable: true,
             render: (p) => (
                 <Badge variant="outline">{p.type_label ?? p.type}</Badge>
             ),
         },
         {
+            key: 'rental_mode',
+            label: t('Rental model'),
+            sortable: true,
+            render: (p) => (
+                <Badge variant="secondary">
+                    {t(
+                        propertyRentalModeOptions.find(
+                            (option) => option.value === p.rental_mode,
+                        )?.label ?? 'Individual units',
+                    )}
+                </Badge>
+            ),
+        },
+        {
             key: 'city',
-            label: 'City',
+            label: t('City'),
             sortable: true,
             className: 'text-muted-foreground',
             render: (p) => p.city?.name ?? '\u2014',
         },
         {
             key: 'units_count',
-            label: 'Total Units',
+            label: t('Total Units'),
             sortable: true,
             className: 'tabular-nums',
+            render: (p) =>
+                supportsUnitInventory(p.rental_mode)
+                    ? (p.units_count ?? 0)
+                    : '\u2014',
         },
         {
             key: 'occupied_units_count',
-            label: 'Occupied',
+            label: t('Occupied'),
             sortable: true,
             className: 'tabular-nums',
+            render: (p) =>
+                supportsUnitInventory(p.rental_mode)
+                    ? (p.occupied_units_count ?? 0)
+                    : '\u2014',
         },
         {
             key: 'tenants_count',
-            label: 'Tenants',
+            label: t('Tenants'),
             sortable: true,
             className: 'tabular-nums',
+            render: (p) =>
+                supportsUnitInventory(p.rental_mode)
+                    ? (p.tenants_count ?? 0)
+                    : '\u2014',
         },
         {
             key: '_status',
-            label: 'Status',
+            label: t('Status'),
             render: (p) => (
                 <StatusBadge
                     domain="property"
@@ -193,15 +210,11 @@ export default function Index({
                             onClick={() => router.get(properties.show.url(p))}
                         >
                             <ExternalLink className="size-4" />
-                            Open Workspace
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => openDetail(p)}>
-                            <Eye className="size-4" />
-                            View
+                            {t('Open Workspace')}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openEdit(p)}>
                             <Pencil className="size-4" />
-                            Edit
+                            {t('Edit')}
                         </DropdownMenuItem>
                         {p.is_active ? (
                             <DropdownMenuItem
@@ -209,12 +222,12 @@ export default function Index({
                                 onClick={() => archive(p)}
                             >
                                 <Trash2 className="size-4" />
-                                Archive
+                                {t('Archive')}
                             </DropdownMenuItem>
                         ) : (
                             <DropdownMenuItem onClick={() => restore(p)}>
                                 <RotateCcw className="size-4" />
-                                Restore
+                                {t('Restore')}
                             </DropdownMenuItem>
                         )}
                     </DropdownMenuContent>
@@ -225,16 +238,39 @@ export default function Index({
 
     return (
         <>
-            <Head title="Properties" />
+            <Head title={t('Properties')} />
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <div className="flex items-center justify-between">
                     <Heading
-                        title="Properties"
-                        description="Manage your properties"
+                        title={t('Properties')}
+                        description={t('Manage your properties')}
                     />
 
-                    <Button onClick={openCreate}>New Property</Button>
+                    <div className="flex items-center gap-2">
+                        <Button onClick={openCreate}>
+                            {t('New Property')}
+                        </Button>
+                        <EntityTransferMenu
+                            datasetLabel={t('Properties')}
+                            canImport={
+                                auth.role === 'owner' ||
+                                auth.permissions.includes('properties.import')
+                            }
+                            canExport={
+                                auth.role === 'owner' ||
+                                auth.permissions.includes('properties.export')
+                            }
+                            importHref={properties.transfer.import.url()}
+                            exportHref={properties.transfer.export.url({
+                                query: {
+                                    search: currentSearch || undefined,
+                                    status: currentStatus || undefined,
+                                    type: currentType || undefined,
+                                },
+                            })}
+                        />
+                    </div>
                 </div>
 
                 <FilterBar
@@ -248,7 +284,9 @@ export default function Index({
                             value={table.searchValue}
                             onChange={table.onSearchChange}
                             onClear={table.clearSearch}
-                            placeholder="Search by name, province, or city..."
+                            placeholder={t(
+                                'Search by name, province, or city...',
+                            )}
                         />
                     }
                 />
@@ -256,32 +294,27 @@ export default function Index({
                 <DataTable
                     columns={columns}
                     rows={data.data}
+                    onRowClick={(property) =>
+                        router.get(properties.show.url(property))
+                    }
+                    isRowInteractive={(property) => property.is_active}
                     currentSort={currentSort}
                     onSort={table.toggleSort}
-                    onRowClick={openDetail}
                     paginator={data}
                     perPage={currentPerPage}
                     onPageChange={table.goToPage}
                     onPerPageChange={table.setPerPage}
-                    noun="properties"
+                    noun={t('properties')}
                     empty={{
-                        message: 'No properties yet.',
-                        createLabel: 'Create your first property',
+                        message: t('No properties yet.'),
+                        createLabel: t('Create your first property'),
                         onCreate: openCreate,
                     }}
                 />
             </div>
 
-            <PropertyDetailSheet
-                key={viewingProperty?.id ?? 'new'}
-                property={viewingProperty}
-                open={detailOpen}
-                onOpenChange={setDetailOpen}
-                onEdit={editFromDetail}
-            />
-
             <PropertyFormSheet
-                key={editingProperty?.id ?? 'new'}
+                key={`form-${editingProperty?.id ?? 'new'}`}
                 property={editingProperty}
                 open={dialogOpen}
                 onOpenChange={setDialogOpen}
@@ -293,9 +326,9 @@ export default function Index({
             >
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Archive property</DialogTitle>
+                        <DialogTitle>{t('Archive property')}</DialogTitle>
                         <DialogDescription>
-                            Are you sure you want to archive{' '}
+                            {t('Are you sure you want to archive')}{' '}
                             <span className="font-medium">
                                 {archiveConfirm?.name}
                             </span>
@@ -307,10 +340,10 @@ export default function Index({
                             variant="outline"
                             onClick={() => setArchiveConfirm(null)}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button variant="destructive" onClick={confirmArchive}>
-                            Archive
+                            {t('Archive')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>

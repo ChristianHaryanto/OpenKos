@@ -1,9 +1,8 @@
-import { Head, router } from '@inertiajs/react';
+import { Head, router, usePage } from '@inertiajs/react';
 import {
     DoorOpen,
     EllipsisVertical,
     ExternalLink,
-    Eye,
     Move,
     Pencil,
     RotateCcw,
@@ -16,13 +15,14 @@ import { FilterBar } from '@/components/data-table/filter-bar';
 import { SearchInput } from '@/components/data-table/search-input';
 import {
     AssignTenantSheet,
-    MoveOutSheet,
+    BulkAssignUnitTypeDialog,
     MoveUnitSheet,
-    UnitDetailSheet,
     UnitFormSheet,
 } from '@/components/features';
+import { EntityTransferMenu } from '@/components/features/data-transfer/transfer-actions';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
     Dialog,
     DialogContent,
@@ -40,54 +40,33 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useTable } from '@/hooks/use-table';
 import { formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import { PropertyLayout } from '@/pages/properties/layout';
+import { UnitTypeLayout } from '@/pages/properties/unit-types/layout';
 import properties from '@/routes/properties';
 import type {
+    AuthPageProps,
     LeaseInfo,
-    PaginatedData,
-    Property,
     Unit,
-    TableMeta,
+    UnitsPageProps,
 } from '@/types';
-
-type PageProps = {
-    property: Property;
-    units: PaginatedData<Unit>;
-    tenants: { id: number; name: string; phone: string }[];
-    availableUnits: {
-        id: number;
-        name: string;
-        property_id: number;
-        capacity: number;
-        occupied_count: number;
-        property: {
-            id: number;
-            name: string;
-            city: { name: string } | null;
-        } | null;
-    }[];
-    sort?: string;
-    search?: string;
-    status?: string;
-    per_page?: number;
-    table: TableMeta;
-};
 
 export default function Index({
     property,
     units: data,
+    unitTypes,
     availableUnits: _availableUnits,
     sort: currentSort = 'name',
     search: currentSearch = '',
     status: currentStatus = '',
+    assignment: currentAssignment = '',
     per_page: currentPerPage = 15,
     table: tableMeta,
-}: PageProps) {
+    unitTypeWorkspace,
+}: UnitsPageProps) {
+    const { auth } = usePage<AuthPageProps>().props;
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingUnit, setEditingUnit] = useState<Unit | null>(null);
-
-    const [detailOpen, setDetailOpen] = useState(false);
-    const [viewingUnit, setViewingUnit] = useState<Unit | null>(null);
 
     const [leaseFormOpen, setLeaseFormOpen] = useState(false);
     const [assignUnit, setAssignUnit] = useState<Unit | null>(null);
@@ -96,43 +75,70 @@ export default function Index({
     const [moveLease, setMoveLease] = useState<LeaseInfo | null>(null);
     const [moveFromUnit, setMoveFromUnit] = useState<Unit | null>(null);
 
-    const [moveOutLeaseData, setMoveOutLeaseData] = useState<{
-        id: number;
-        tenants: { id: number; name: string; phone: string | null }[];
-        primary_tenant: {
-            id: number;
-            name: string;
-            phone: string | null;
-        } | null;
-        unit: {
-            id: number;
-            name: string;
-            property_id: number;
-            property: {
-                id: number;
-                name: string;
-                city: { name: string } | null;
-            } | null;
-        } | null;
-    } | null>(null);
-    const [moveOutOpen, setMoveOutOpen] = useState(false);
-
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [unitToDelete, setUnitToDelete] = useState<Unit | null>(null);
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const [bulkAssignmentOpen, setBulkAssignmentOpen] = useState(false);
 
     const table = useTable({
-        routeFn: () => ({ url: properties.units.index.url(property) }),
+        routeFn: () => (unitTypeWorkspace
+            ? { url: properties.unitTypes.units.url({ property, unitType: unitTypeWorkspace }) }
+            : { url: properties.units.index.url(property) }),
         params: {
             sort: currentSort,
             search: currentSearch,
             per_page: String(currentPerPage),
             status: currentStatus,
+            assignment: currentAssignment,
         },
         defaults: {
             sort: 'name',
             per_page: '15',
         },
     });
+
+    function clearSelection() {
+        setSelectedIds(new Set());
+    }
+
+    function handleSearchChange(value: string) {
+        clearSelection();
+        table.onSearchChange(value);
+    }
+
+    function handleSearchClear() {
+        clearSelection();
+        table.clearSearch();
+    }
+
+    function handleFilterToggle(key: string, value: string) {
+        clearSelection();
+        table.toggleFilterOption(key, value);
+    }
+
+    function handleClearFilters() {
+        clearSelection();
+        table.clearAllFilters();
+    }
+
+    function handleSort(column: string) {
+        clearSelection();
+        table.toggleSort(column);
+    }
+
+    function handlePageChange(page: number) {
+        clearSelection();
+        table.goToPage(page);
+    }
+
+    function handlePerPageChange(perPage: number) {
+        clearSelection();
+        table.setPerPage(perPage);
+    }
+
+    const currentEditingUnit = editingUnit
+        ? (data.data.find((item) => item.id === editingUnit.id) ?? editingUnit)
+        : null;
 
     function openCreate() {
         setEditingUnit(null);
@@ -144,77 +150,14 @@ export default function Index({
         setDialogOpen(true);
     }
 
-    function openDetail(unit: Unit) {
-        setViewingUnit(unit);
-        setDetailOpen(true);
-    }
-
-    function editFromDetail() {
-        if (!viewingUnit) {
-            return;
-        }
-
-        setEditingUnit(viewingUnit);
-        setDetailOpen(false);
-        setDialogOpen(true);
-    }
-
-    function openAssignTenant() {
-        if (!viewingUnit) {
-            return;
-        }
-
-        setAssignUnit(viewingUnit);
-        setDetailOpen(false);
-        setLeaseFormOpen(true);
-    }
-
-    function openMoveUnit() {
-        if (!viewingUnit) {
-            return;
-        }
-
-        const lease = viewingUnit.leases?.[0];
+    function openMoveUnit(unit: Unit) {
+        const lease = unit.leases?.[0];
 
         if (lease) {
-            setMoveFromUnit(viewingUnit);
+            setMoveFromUnit(unit);
             setMoveLease(lease);
-            setDetailOpen(false);
             setMoveOpen(true);
         }
-    }
-
-    function openMoveOut() {
-        if (!viewingUnit) {
-            return;
-        }
-
-        const lease = viewingUnit.leases?.[0];
-
-        if (!lease) {
-            return;
-        }
-
-        setMoveOutLeaseData({
-            id: lease.id,
-            tenants: lease.tenants ?? [],
-            primary_tenant: lease.primary_tenant ?? null,
-            unit: {
-                id: viewingUnit.id,
-                name: viewingUnit.name,
-                property_id: property.id,
-                property: {
-                    id: property.id,
-                    name: property.name,
-                    city:
-                        property.city && typeof property.city === 'string'
-                            ? { name: property.city }
-                            : null,
-                },
-            },
-        });
-        setDetailOpen(false);
-        setMoveOutOpen(true);
     }
 
     function confirmDelete(unit: Unit) {
@@ -251,7 +194,70 @@ export default function Index({
         return _availableUnits.filter((r) => r.id !== currentUnitId);
     }
 
+    const selectableUnits = data.data.filter((unit) => !unit.deleted_at);
+    const selectedUnits = selectableUnits.filter((unit) =>
+        selectedIds.has(unit.id),
+    );
+    const allVisibleSelected =
+        selectableUnits.length > 0 &&
+        selectableUnits.every((unit) => selectedIds.has(unit.id));
+
+    function toggleUnit(unitId: number) {
+        setSelectedIds((previous) => {
+            const next = new Set(previous);
+
+            if (next.has(unitId)) {
+                next.delete(unitId);
+            } else {
+                next.add(unitId);
+            }
+
+            return next;
+        });
+    }
+
+    function toggleVisibleUnits() {
+        setSelectedIds((previous) => {
+            const next = new Set(previous);
+
+            if (allVisibleSelected) {
+                selectableUnits.forEach((unit) => next.delete(unit.id));
+            } else {
+                selectableUnits.forEach((unit) => next.add(unit.id));
+            }
+
+            return next;
+        });
+    }
+
     const columns: TableColumn<Unit>[] = [
+        {
+            key: 'select',
+            label: '',
+            header: (
+                <Checkbox
+                    checked={
+                        allVisibleSelected
+                            ? true
+                            : selectedUnits.length > 0
+                              ? 'indeterminate'
+                              : false
+                    }
+                    onCheckedChange={toggleVisibleUnits}
+                    aria-label={t('Select all visible Units')}
+                    disabled={selectableUnits.length === 0}
+                />
+            ),
+            render: (unit) => (
+                <Checkbox
+                    checked={selectedIds.has(unit.id)}
+                    onCheckedChange={() => toggleUnit(unit.id)}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-label={t('Select :name', { name: unit.name })}
+                    disabled={Boolean(unit.deleted_at)}
+                />
+            ),
+        },
         {
             key: 'name',
             label: 'Name',
@@ -264,6 +270,11 @@ export default function Index({
             sortable: true,
             className: 'text-muted-foreground',
             render: (r) => r.floor ?? '\u2014',
+        },
+        {
+            key: 'unit_type',
+            label: 'Unit Type',
+            render: (r) => r.unit_type?.name ?? '—',
         },
         {
             key: 'size_sqm',
@@ -295,7 +306,10 @@ export default function Index({
             className: 'tabular-nums',
             render: (r) =>
                 r.active_rates?.[0]
-                    ? formatPrice(r.active_rates[0].amount)
+                    ? formatPrice(
+                          r.active_rates[0].amount,
+                          r.active_rates[0].currency,
+                      )
                     : '\u2014',
         },
         {
@@ -369,13 +383,7 @@ export default function Index({
                                     }
                                 >
                                     <ExternalLink className="size-4" />
-                                    Open Workspace
-                                </DropdownMenuItem>
-                            )}
-                            {!r.deleted_at && (
-                                <DropdownMenuItem onClick={() => openDetail(r)}>
-                                    <Eye className="size-4" />
-                                    View
+                                    {t('Open Workspace')}
                                 </DropdownMenuItem>
                             )}
                             {!r.deleted_at && r.capacity > occupants.length && (
@@ -386,26 +394,18 @@ export default function Index({
                                     }}
                                 >
                                     <DoorOpen className="size-4" />
-                                    Assign Tenant
+                                    {t('Assign Tenant')}
                                     {r.capacity > 1 ? '(s)' : ''}
                                 </DropdownMenuItem>
                             )}
                             {!r.deleted_at && hasActiveLease && (
                                 <DropdownMenuItem
                                     onClick={() => {
-                                        setViewingUnit(r);
-                                        setDetailOpen(false);
-                                        const lease = r.leases?.[0];
-
-                                        if (lease) {
-                                            setMoveFromUnit(r);
-                                            setMoveLease(lease);
-                                            setMoveOpen(true);
-                                        }
+                                        openMoveUnit(r);
                                     }}
                                 >
                                     <Move className="size-4" />
-                                    Move Unit
+                                    {t('Move Unit')}
                                 </DropdownMenuItem>
                             )}
                             {!r.deleted_at &&
@@ -416,7 +416,7 @@ export default function Index({
                             {r.deleted_at ? (
                                 <DropdownMenuItem onClick={() => restore(r)}>
                                     <RotateCcw className="size-4" />
-                                    Restore
+                                    {t('Restore')}
                                 </DropdownMenuItem>
                             ) : (
                                 <>
@@ -424,14 +424,14 @@ export default function Index({
                                         onClick={() => openEdit(r)}
                                     >
                                         <Pencil className="size-4" />
-                                        Edit
+                                        {t('Edit')}
                                     </DropdownMenuItem>
                                     <DropdownMenuItem
                                         variant="destructive"
                                         onClick={() => confirmDelete(r)}
                                     >
                                         <Trash2 className="size-4" />
-                                        Delete
+                                        {t('Delete')}
                                     </DropdownMenuItem>
                                 </>
                             )}
@@ -442,71 +442,129 @@ export default function Index({
         },
     ];
 
-    return (
-        <PropertyLayout property={property} activeTab="units">
-            <Head title={`Units - ${property.name}`} />
+    const content = (
+        <>
+            <Head title={`${t('Units')} - ${property.name}`} />
 
             <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-end">
-                    <Button onClick={openCreate}>New Unit</Button>
+                <div className="flex items-center justify-end gap-2">
+                    <Button onClick={openCreate}>{t('New Unit')}</Button>
+                    <EntityTransferMenu
+                        datasetLabel={t('Units')}
+                        canImport={
+                            auth.role === 'owner' ||
+                            auth.permissions.includes('units.import')
+                        }
+                        canExport={
+                            auth.role === 'owner' ||
+                            auth.permissions.includes('units.export')
+                        }
+                        importHref={properties.units.transfer.import.url(
+                            property,
+                        )}
+                        exportHref={properties.units.transfer.export.url(
+                            property,
+                            {
+                                query: {
+                                    search: currentSearch || undefined,
+                                    status: currentStatus || undefined,
+                                },
+                            },
+                        )}
+                    />
                 </div>
 
                 <FilterBar
                     filters={tableMeta.filters}
                     activeFilters={table.activeFilters}
                     activeFilterCount={table.activeFilterCount}
-                    onToggleOption={table.toggleFilterOption}
-                    onClearAll={table.clearAllFilters}
+                    onToggleOption={handleFilterToggle}
+                    onClearAll={handleClearFilters}
                     searchInput={
                         <SearchInput
                             value={table.searchValue}
-                            onChange={table.onSearchChange}
-                            onClear={table.clearSearch}
-                            placeholder="Search by name or floor..."
+                            onChange={handleSearchChange}
+                            onClear={handleSearchClear}
+                            placeholder={t('Search by name or floor...')}
                         />
                     }
                 />
+
+                {selectedUnits.length > 0 && (
+                    <div
+                        role="toolbar"
+                        aria-label={t('Bulk Unit actions')}
+                        className="fixed inset-x-3 bottom-4 z-40 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-full border bg-card px-5 py-2 text-xs shadow-lg sm:inset-x-auto sm:left-1/2 sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2"
+                    >
+                        <span className="font-medium tabular-nums">
+                            {selectedUnits.length} {t('selected')}
+                        </span>
+                        <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-xs"
+                            onClick={() => setBulkAssignmentOpen(true)}
+                        >
+                            {t('Assign Unit Type')}
+                        </Button>
+                        <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="ml-auto text-muted-foreground hover:text-foreground"
+                        >
+                            {t('Clear selection')}
+                        </button>
+                    </div>
+                )}
 
                 <DataTable
                     columns={columns}
                     rows={data.data}
                     currentSort={currentSort}
-                    onSort={table.toggleSort}
-                    onRowClick={openDetail}
+                    onSort={handleSort}
+                    onRowClick={(unit) =>
+                        router.get(
+                            properties.units.show.url({
+                                property: property.slug,
+                                unit: unit.slug,
+                            }),
+                        )
+                    }
+                    isRowInteractive={(unit) => !unit.deleted_at}
                     paginator={data}
                     perPage={currentPerPage}
-                    onPageChange={table.goToPage}
-                    onPerPageChange={table.setPerPage}
-                    noun="units"
+                    onPageChange={handlePageChange}
+                    onPerPageChange={handlePerPageChange}
+                    noun={t('units')}
                     empty={{
-                        message: 'No units yet.',
-                        createLabel: 'Create your first unit',
+                        message: t('No units yet.'),
+                        createLabel: t('Create your first unit'),
                         onCreate: openCreate,
                     }}
                 />
             </div>
 
-            <UnitDetailSheet
-                unit={viewingUnit}
-                property={property}
-                open={detailOpen}
-                onOpenChange={setDetailOpen}
-                onEdit={editFromDetail}
-                onAssignTenant={openAssignTenant}
-                onMoveOut={openMoveOut}
-                onMoveUnit={openMoveUnit}
-            />
-
             <UnitFormSheet
-                key={editingUnit?.id ?? 'new'}
-                unit={editingUnit}
+                key={`${currentEditingUnit?.id ?? 'new'}-${currentEditingUnit?.updated_at ?? ''}`}
+                unit={currentEditingUnit}
                 property={property}
+                unitTypes={unitTypes}
                 open={dialogOpen}
                 onOpenChange={setDialogOpen}
             />
 
+            <BulkAssignUnitTypeDialog
+                key={selectedUnits.map((unit) => unit.id).join('-')}
+                property={property}
+                units={selectedUnits}
+                unitTypes={unitTypes}
+                open={bulkAssignmentOpen}
+                onOpenChange={setBulkAssignmentOpen}
+            />
+
             {assignUnit && (
                 <AssignTenantSheet
+                    key={assignUnit.id}
                     unit={assignUnit}
                     property={property}
                     open={leaseFormOpen}
@@ -525,23 +583,16 @@ export default function Index({
                 />
             )}
 
-            <MoveOutSheet
-                lease={moveOutLeaseData}
-                availableUnits={_availableUnits}
-                open={moveOutOpen}
-                onOpenChange={setMoveOutOpen}
-            />
-
             <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Delete unit</DialogTitle>
+                        <DialogTitle>{t('Delete unit')}</DialogTitle>
                         <DialogDescription>
-                            Are you sure you want to delete{' '}
+                            {t('Are you sure you want to delete')}{' '}
                             <span className="font-medium">
                                 {unitToDelete?.name}
                             </span>
-                            ? This action cannot be undone.
+                            ? {t('This action cannot be undone.')}
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter>
@@ -549,14 +600,22 @@ export default function Index({
                             variant="outline"
                             onClick={() => setDeleteDialogOpen(false)}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </Button>
                         <Button variant="destructive" onClick={destroy}>
-                            Delete
+                            {t('Delete')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
-        </PropertyLayout>
+        </>
+    );
+
+    return unitTypeWorkspace ? (
+        <UnitTypeLayout property={property} unitType={unitTypeWorkspace} activeTab="units">
+            {content}
+        </UnitTypeLayout>
+    ) : (
+        <PropertyLayout property={property} activeTab="units">{content}</PropertyLayout>
     );
 }

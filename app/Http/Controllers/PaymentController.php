@@ -13,8 +13,11 @@ use App\Exceptions\PaymentOverflowException;
 use App\Http\Requests\Payment\StorePaymentRequest;
 use App\Models\Invoice;
 use App\Models\Lease;
+use App\Models\Media;
 use App\Models\Payment;
 use App\Models\PaymentProof;
+use App\Services\Payments\MoneyConverter;
+use Brick\Math\BigDecimal;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -22,6 +25,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
 use OpenKOS\Core\Events\PaymentRecorded as PlatformPaymentRecorded;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PaymentController extends Controller
 {
@@ -35,7 +39,7 @@ class PaymentController extends Controller
         $request->ensureInvoiceIsPayable($invoice);
 
         $data = new RecordPaymentData(
-            amount: (int) $request->amount,
+            amount: (string) $request->amount,
             paymentDate: $request->paid_at,
             paymentMethod: $request->payment_method,
             notes: $request->notes,
@@ -60,7 +64,7 @@ class PaymentController extends Controller
         Inertia::flash('toast', [
             'type' => 'success',
             'message' => __('Payment of :amount recorded for :period.', [
-                'amount' => number_format((float) $payment->amount, 0, ',', '.'),
+                'amount' => $payment->amount.' '.$payment->currency,
                 'period' => $invoice->period_start->format('F Y'),
             ]),
         ]);
@@ -68,15 +72,43 @@ class PaymentController extends Controller
         return back();
     }
 
-    public function proof(Payment $payment, PaymentProof $proof)
+    public function proof(Payment $payment, PaymentProof $proof): StreamedResponse
     {
         $this->authorize('view', $payment);
+        abort_if($proof->payment_id !== $payment->id, 404);
 
-        if (! Storage::disk('local')->exists($proof->path)) {
-            abort(404);
+        if ($proof->media_id !== null) {
+            $media = $this->canonicalMedia($payment, $proof);
+
+            $storage = Storage::disk($media->disk);
+            abort_unless($storage->exists($media->path), 404);
+
+            return $storage->response($media->path, $media->original_name, [
+                'Content-Type' => $media->mime_type,
+            ]);
         }
 
-        return Storage::disk('local')->response($proof->path);
+        $storage = Storage::disk('local');
+        abort_unless($storage->exists($proof->path), 404);
+
+        return $storage->response($proof->path, $proof->original_name, [
+            'Content-Type' => $proof->mime_type,
+        ]);
+    }
+
+    private function canonicalMedia(Payment $payment, PaymentProof $proof): Media
+    {
+        $media = $proof->media;
+
+        abort_if(
+            $media === null
+                || $media->mediable_type !== $payment->getMorphClass()
+                || (string) $media->mediable_id !== (string) $proof->payment_id
+                || $media->collection !== 'proofs',
+            404,
+        );
+
+        return $media;
     }
 
     public function __construct(
@@ -111,11 +143,14 @@ class PaymentController extends Controller
 
             if ($newStatus === PaymentStatus::Confirmed) {
 
-                $confirmedSum = (float) $invoice->payments()
+                $confirmedSum = (string) $invoice->payments()
                     ->where('status', PaymentStatus::Confirmed->value)
                     ->sum('amount');
 
-                if ($confirmedSum + (float) $lockedPayment->amount > (float) $invoice->total) {
+                if (app(MoneyConverter::class)->compare(
+                    BigDecimal::of($confirmedSum)->plus((string) $lockedPayment->amount)->toString(),
+                    (string) $invoice->total,
+                ) > 0) {
                     abort(422, 'Confirming this payment would exceed the invoice total.');
                 }
 
@@ -143,11 +178,11 @@ class PaymentController extends Controller
                     'verified_at' => now(),
                 ]);
 
-                Invoice::whereIn('id', $affectedInvoiceIds)
+                $affectedInvoices = Invoice::whereIn('id', $affectedInvoiceIds)
                     ->lockForUpdate()
-                    ->get()
-                    ->each
-                    ->recalculateStatus();
+                    ->get();
+
+                Invoice::recalculateStatuses($affectedInvoices);
             }
         });
 

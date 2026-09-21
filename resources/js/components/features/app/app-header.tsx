@@ -26,14 +26,11 @@ import {
 
 import { useCurrentUrl } from '@/hooks/use-current-url';
 import { useInitials } from '@/hooks/use-initials';
+import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { dashboard } from '@/routes';
-import type { BreadcrumbItem, NavItem } from '@/types';
+import type { AppHeaderProps, NavItem } from '@/types';
 import type { Auth } from '@/types/auth';
-
-type Props = {
-    breadcrumbs?: BreadcrumbItem[];
-};
 
 const mainNavItems: NavItem[] = [
     {
@@ -46,10 +43,9 @@ const mainNavItems: NavItem[] = [
 const activeItemStyles =
     'text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100';
 
-export function AppHeader({ breadcrumbs = [] }: Props) {
-    const { auth, setting } = usePage<{
+export function AppHeader({ breadcrumbs = [] }: AppHeaderProps) {
+    const { auth } = usePage<{
         auth: Auth;
-        setting: { site_name: string };
     }>().props;
     const getInitials = useInitials();
     const { isCurrentUrl, whenCurrentUrl } = useCurrentUrl();
@@ -75,12 +71,10 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
                                 className="flex h-full w-64 flex-col items-stretch justify-between bg-sidebar"
                             >
                                 <SheetTitle className="sr-only">
-                                    Navigation menu
+                                    {t('Navigation menu')}
                                 </SheetTitle>
                                 <SheetHeader className="flex justify-start text-left">
-                                    <span className="text-base font-semibold">
-                                        {setting.site_name}
-                                    </span>
+                                    <AppLogo />
                                 </SheetHeader>
                                 <div className="flex h-full flex-1 flex-col space-y-4 p-4">
                                     <div className="flex h-full flex-col justify-between text-sm">
@@ -94,7 +88,7 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
                                                     {item.icon && (
                                                         <item.icon className="h-5 w-5" />
                                                     )}
-                                                    <span>{item.title}</span>
+                                                    <span>{t(item.title)}</span>
                                                 </Link>
                                             ))}
                                         </div>
@@ -135,7 +129,7 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
                                             {item.icon && (
                                                 <item.icon className="mr-2 h-4 w-4" />
                                             )}
-                                            {item.title}
+                                            {t(item.title)}
                                         </Link>
                                         {isCurrentUrl(item.href!) && (
                                             <div className="absolute bottom-0 left-0 h-0.5 w-full translate-y-px bg-black dark:bg-white"></div>

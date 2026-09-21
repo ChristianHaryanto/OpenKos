@@ -3,27 +3,33 @@
 namespace App\Business\Reminders;
 
 use App\Data\Reminder\ReminderEvent;
+use App\Data\Reminder\ReminderInvoiceData;
 use App\Data\Reminder\ReminderSettings;
 use App\Enums\ReminderType;
-use App\Models\Invoice;
 use App\Models\Lease;
-use Carbon\Carbon;
 use Carbon\CarbonInterface;
 
 class PaymentReminderScheduler
 {
-    /** @return array<ReminderEvent> */
-    public function pendingFor(Lease $lease, ReminderSettings $settings): array
-    {
-        $invoices = $lease->invoices()->payable()->orderBy('period_start')->get();
-        $today = now()->startOfDay();
+    /**
+     * @param  iterable<int, ReminderInvoiceData>  $invoices
+     * @return array<int, ReminderEvent>
+     */
+    public function pendingFor(
+        Lease $lease,
+        iterable $invoices,
+        ReminderSettings $settings,
+        CarbonInterface $today,
+    ): array {
+        $today = $today->copy()->startOfDay();
         $events = [];
 
         foreach ($invoices as $invoice) {
-            $dueDate = Carbon::parse($invoice->due_date)->startOfDay();
-            $amount = (int) str_replace('.', '', $invoice->outstanding);
-            $periodStart = $invoice->period_start->toDateString();
-            $periodEnd = $invoice->period_end->toDateString();
+            $dueDate = $invoice->dueDate;
+            $amount = $invoice->amount;
+            $currency = $invoice->currency;
+            $periodStart = $invoice->periodStart;
+            $periodEnd = $invoice->periodEnd;
             $dueDateStr = $dueDate->toDateString();
 
             $status = $dueDate->lessThan($today)
@@ -31,9 +37,9 @@ class PaymentReminderScheduler
                 : ($dueDate->greaterThan($today) ? 'upcoming' : 'due');
 
             match ($status) {
-                'upcoming' => $this->collectUpcoming($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $dueDate, $today, $settings),
-                'due' => $this->collectDueToday($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $dueDate, $today),
-                'overdue' => $this->collectOverdue($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $dueDate, $today, $settings),
+                'upcoming' => $this->collectUpcoming($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $currency, $dueDate, $today, $settings),
+                'due' => $this->collectDueToday($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $currency, $dueDate, $today),
+                'overdue' => $this->collectOverdue($events, $lease, $invoice, $periodStart, $periodEnd, $dueDateStr, $amount, $currency, $dueDate, $today, $settings),
             };
         }
 
@@ -43,11 +49,12 @@ class PaymentReminderScheduler
     private function collectUpcoming(
         array &$events,
         Lease $lease,
-        Invoice $invoice,
+        ReminderInvoiceData $invoice,
         string $periodStart,
         string $periodEnd,
         string $dueDateStr,
-        int $amount,
+        string $amount,
+        string $currency,
         CarbonInterface $dueDate,
         CarbonInterface $today,
         ReminderSettings $settings,
@@ -62,7 +69,8 @@ class PaymentReminderScheduler
                 periodEnd: $periodEnd,
                 dueDate: $dueDateStr,
                 amount: $amount,
-                invoice: $invoice,
+                currency: $currency,
+                invoice: $invoice->invoice,
             );
         }
     }
@@ -70,11 +78,12 @@ class PaymentReminderScheduler
     private function collectDueToday(
         array &$events,
         Lease $lease,
-        Invoice $invoice,
+        ReminderInvoiceData $invoice,
         string $periodStart,
         string $periodEnd,
         string $dueDateStr,
-        int $amount,
+        string $amount,
+        string $currency,
         CarbonInterface $dueDate,
         CarbonInterface $today,
     ): void {
@@ -86,7 +95,8 @@ class PaymentReminderScheduler
                 periodEnd: $periodEnd,
                 dueDate: $dueDateStr,
                 amount: $amount,
-                invoice: $invoice,
+                currency: $currency,
+                invoice: $invoice->invoice,
             );
         }
     }
@@ -94,11 +104,12 @@ class PaymentReminderScheduler
     private function collectOverdue(
         array &$events,
         Lease $lease,
-        Invoice $invoice,
+        ReminderInvoiceData $invoice,
         string $periodStart,
         string $periodEnd,
         string $dueDateStr,
-        int $amount,
+        string $amount,
+        string $currency,
         CarbonInterface $dueDate,
         CarbonInterface $today,
         ReminderSettings $settings,
@@ -114,8 +125,9 @@ class PaymentReminderScheduler
                     periodEnd: $periodEnd,
                     dueDate: $dueDateStr,
                     amount: $amount,
+                    currency: $currency,
                     overdueDays: $interval,
-                    invoice: $invoice,
+                    invoice: $invoice->invoice,
                 );
             }
         }

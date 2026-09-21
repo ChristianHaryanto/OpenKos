@@ -9,13 +9,15 @@ use App\Exceptions\PaymentOverflowException;
 use App\Models\Invoice;
 use App\Models\User;
 use App\Results\Payment\RecordPaymentResult;
+use App\Services\Media\MediaManager;
+use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 class RecordPayment
 {
     public function __construct(
         private AllocatePayment $allocatePayment,
+        private MediaManager $mediaManager,
     ) {}
 
     public function execute(Invoice $invoice, RecordPaymentData $data, User $user, bool $forcePending = false): RecordPaymentResult
@@ -28,20 +30,21 @@ class RecordPayment
             // correct outstanding balance and cannot overpay.
             $locked = Invoice::lockForUpdate()->findOrFail($invoice->id);
 
-            $availableAmount = (float) $locked->outstanding;
+            $availableAmount = BigDecimal::of($locked->outstanding);
 
             if ($forcePending) {
-                $availableAmount -= (float) $locked->payments()
+                $availableAmount = $availableAmount->minus((string) $locked->payments()
                     ->where('status', PaymentStatus::Pending)
-                    ->sum('amount');
+                    ->sum('amount'));
             }
 
-            if ($data->amount > $availableAmount) {
+            if (BigDecimal::of($data->amount)->compareTo($availableAmount) > 0) {
                 throw new PaymentOverflowException;
             }
 
             $payment = $locked->payments()->create([
                 'amount' => $data->amount,
+                'currency' => $locked->currency,
                 'payment_date' => $data->paymentDate,
                 'payment_method' => $data->paymentMethod,
                 'notes' => $data->notes,
@@ -54,18 +57,17 @@ class RecordPayment
 
             if ($hasProof) {
                 $file = $data->proof;
-                $extension = $file->getClientOriginalExtension();
-                $path = $file->storeAs(
-                    'payment-proofs/'.$payment->id,
-                    (string) Str::uuid().'.'.$extension,
-                    'local',
-                );
+                // Keep compatibility-phase uploads readable by released code, which assumes local.
+                $media = $this->mediaManager->store($payment, 'proofs', $file, disk: 'local');
 
-                $payment->proofs()->create([
-                    'path' => $path,
-                    'original_name' => $file->getClientOriginalName(),
-                    'mime_type' => $file->getMimeType(),
+                $proof = $payment->proofs()->make([
+                    'media_id' => $media->id,
+                    'original_name' => $media->original_name,
+                    'mime_type' => $media->mime_type,
                 ]);
+
+                // Deprecated compatibility field; canonical storage is Media.
+                $proof->forceFill(['path' => $media->path])->saveOrFail();
             }
 
             if ($payment->status === PaymentStatus::Confirmed) {
@@ -75,7 +77,7 @@ class RecordPayment
             return $payment;
         });
 
-        $payment->load('confirmedBy:id,name', 'recordedBy:id,name', 'proofs');
+        $payment->load('confirmedBy:id,name', 'recordedBy:id,name', 'proofs.media');
 
         return RecordPaymentResult::success($payment);
 

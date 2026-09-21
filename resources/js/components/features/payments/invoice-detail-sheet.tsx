@@ -11,6 +11,7 @@ import {
     SheetTitle,
 } from '@/components/ui/sheet';
 import { formatDate, formatPeriod, formatPrice } from '@/lib/formatters';
+import { t } from '@/lib/i18n';
 import leases from '@/routes/leases';
 import leaseInvoices from '@/routes/leases/workspace/invoices';
 import paymentRoutes from '@/routes/payments';
@@ -89,7 +90,7 @@ export default function InvoiceDetailSheet({
                 <SheetContent className="sm:max-w-lg">
                     <SheetHeader>
                         <SheetTitle>
-                            {invoice?.reference ?? 'Invoice'}
+                            {invoice?.reference ?? t('Invoice')}
                         </SheetTitle>
                     </SheetHeader>
 
@@ -102,7 +103,6 @@ export default function InvoiceDetailSheet({
                                             <p className="font-medium">
                                                 {formatPeriod(
                                                     invoice.period_start,
-                                                    'id-ID',
                                                 )}
                                             </p>
                                             <p className="text-sm text-muted-foreground">
@@ -121,27 +121,32 @@ export default function InvoiceDetailSheet({
 
                                     <div className="mt-4 grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
                                         <DetailRow
-                                            label="Total"
-                                            value={formatPrice(invoice.total)}
+                                            label={t('Total')}
+                                            value={formatPrice(
+                                                invoice.total,
+                                                invoice.currency,
+                                            )}
                                         />
                                         <DetailRow
-                                            label="Paid"
+                                            label={t('Paid')}
                                             value={formatPrice(
                                                 invoice.amount_paid,
+                                                invoice.currency,
                                             )}
                                         />
                                         <DetailRow
-                                            label="Outstanding"
+                                            label={t('Outstanding')}
                                             value={formatPrice(
                                                 invoice.outstanding,
+                                                invoice.currency,
                                             )}
                                         />
                                         <DetailRow
-                                            label="Due date"
+                                            label={t('Due date')}
                                             value={formatDate(invoice.due_date)}
                                         />
                                         <DetailRow
-                                            label="Lease"
+                                            label={t('Lease')}
                                             value={
                                                 invoice.lease_reference ??
                                                 `#${invoice.lease_id}`
@@ -155,7 +160,7 @@ export default function InvoiceDetailSheet({
                                         <section className="rounded-lg border">
                                             <div className="border-b px-4 py-3">
                                                 <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                                                    Line Items
+                                                    {t('Line Items')}
                                                 </h3>
                                             </div>
                                             <div className="divide-y">
@@ -178,6 +183,7 @@ export default function InvoiceDetailSheet({
                                                             <p className="tabular-nums">
                                                                 {formatPrice(
                                                                     item.amount,
+                                                                    invoice.currency,
                                                                 )}
                                                             </p>
                                                         </div>
@@ -190,7 +196,7 @@ export default function InvoiceDetailSheet({
                                 <section className="rounded-lg border">
                                     <div className="border-b px-4 py-3">
                                         <h3 className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
-                                            Payments
+                                            {t('Payments')}
                                         </h3>
                                     </div>
                                     {invoice.payments &&
@@ -210,6 +216,7 @@ export default function InvoiceDetailSheet({
                                                         <p className="font-medium tabular-nums">
                                                             {formatPrice(
                                                                 payment.amount,
+                                                                payment.currency,
                                                             )}
                                                         </p>
                                                         <p className="text-xs text-muted-foreground">
@@ -227,7 +234,7 @@ export default function InvoiceDetailSheet({
                                         </div>
                                     ) : (
                                         <div className="px-4 py-6 text-sm text-muted-foreground">
-                                            No payments recorded yet.
+                                            {t('No payments recorded yet.')}
                                         </div>
                                     )}
                                 </section>
@@ -240,7 +247,7 @@ export default function InvoiceDetailSheet({
                                         onClick={() => onRecordPayment(invoice)}
                                     >
                                         <Banknote className="size-4" />
-                                        Record Payment
+                                        {t('Record Payment')}
                                     </Button>
                                 )}
                                 <Button variant="outline" asChild>
@@ -251,7 +258,7 @@ export default function InvoiceDetailSheet({
                                         ])}
                                     >
                                         <ArrowUpRight className="size-4" />
-                                        View Invoice
+                                        {t('View Invoice')}
                                     </Link>
                                 </Button>
                                 <Button variant="outline" asChild>
@@ -261,7 +268,7 @@ export default function InvoiceDetailSheet({
                                         })}
                                     >
                                         <ArrowUpRight className="size-4" />
-                                        View Lease
+                                        {t('View Lease')}
                                     </Link>
                                 </Button>
                                 <Button
@@ -269,7 +276,7 @@ export default function InvoiceDetailSheet({
                                     variant="outline"
                                     onClick={() => onOpenChange(false)}
                                 >
-                                    Close
+                                    {t('Close')}
                                 </Button>
                             </div>
                         </div>
@@ -296,7 +303,7 @@ export default function InvoiceDetailSheet({
                     src={previewProof.src}
                     mimeType={previewProof.mimeType}
                     title={previewProof.name}
-                    subtitle="Payment Proof"
+                    subtitle={t('Payment Proof')}
                     onClose={() => setPreviewProof(null)}
                 />
             )}

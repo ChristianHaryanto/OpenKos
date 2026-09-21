@@ -3,7 +3,6 @@
 namespace App\Http\Controllers\Dashboard;
 
 use App\Business\Dashboard\OverviewStatsCalculator;
-use App\Enums\LeaseStatus;
 use App\Enums\MaintenanceStatus;
 use App\Enums\PaymentStatus;
 use App\Enums\UnitStatus;
@@ -19,6 +18,8 @@ use App\Models\PropertyType;
 use App\Models\Region;
 use App\Models\Setting;
 use App\Models\Unit;
+use App\Support\DateTimeFormatter;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -40,14 +41,17 @@ class OverviewController extends Controller
                 'units as occupied_units_count' => fn (Builder $q) => $q
                     ->where(function (Builder $q) {
                         $q->where('status', UnitStatus::Occupied)
-                            ->orWhereHas('leases', fn (Builder $q) => $q->where('status', LeaseStatus::Active->value));
+                            ->orWhereHas('leases', fn (Builder $q) => $q->active())
+                            ->orWhereHas('property.activeWholePropertyLeases');
                     }),
                 'units as maintenance_units_count' => fn (Builder $q) => $q
                     ->where('status', UnitStatus::Maintenance)
-                    ->whereDoesntHave('leases', fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)),
+                    ->whereDoesntHave('leases', fn (Builder $q) => $q->active())
+                    ->whereDoesntHave('property.activeWholePropertyLeases'),
                 'units as unavailable_units_count' => fn (Builder $q) => $q
                     ->where('status', UnitStatus::Unavailable)
-                    ->whereDoesntHave('leases', fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)),
+                    ->whereDoesntHave('leases', fn (Builder $q) => $q->active())
+                    ->whereDoesntHave('property.activeWholePropertyLeases'),
             ])
             ->orderBy('name')
             ->get(['id', 'name', 'slug']);
@@ -64,18 +68,19 @@ class OverviewController extends Controller
             ))
             ->pluck('id');
 
-        $activeLeases = Lease::where('status', LeaseStatus::Active->value)
-            ->whereHas('unit.property', fn (Builder $q) => $q->whereIn('id', $accessibleProperties));
+        $accessibleLeases = Lease::query()
+            ->whereIn('property_id', $accessibleProperties);
 
-        $invoiceScope = Invoice::whereHas('lease', fn (Builder $q) => $q
-            ->where('status', LeaseStatus::Active->value)
-            ->whereHas('unit.property', fn (Builder $q) => $q->whereIn('id', $accessibleProperties)));
+        $activeLeases = (clone $accessibleLeases)
+            ->active();
+
+        $invoiceScope = Invoice::query()
+            ->whereIn('lease_id', (clone $accessibleLeases)->select('id'));
 
         $overdueInvoices = (clone $invoiceScope)
             ->payable()
             ->whereDate('due_date', '<', now())
-            ->selectRaw('COUNT(*) as count, COALESCE(SUM(total - amount_paid), 0) as amount')
-            ->first();
+            ->get(['currency', 'total', 'amount_paid']);
 
         $dueTodayInvoices = (clone $invoiceScope)
             ->payable()
@@ -93,13 +98,15 @@ class OverviewController extends Controller
 
         $pendingPaymentVerification = Payment::query()
             ->where('status', PaymentStatus::Pending->value)
-            ->whereHas('invoice.lease.unit.property', fn (Builder $q) => $q->whereIn('id', $accessibleProperties))
+            ->whereHas('invoice.lease', fn (Builder $q) => $q->whereIn('property_id', $accessibleProperties))
             ->count();
 
         $attention = [
             'overdue_invoices' => [
-                'count' => (int) ($overdueInvoices->count ?? 0),
-                'amount' => (int) ($overdueInvoices->amount ?? 0),
+                'count' => $overdueInvoices->count(),
+                'amounts' => $this->aggregateMoney($overdueInvoices, fn (Invoice $invoice): string => BigDecimal::of((string) $invoice->total)
+                    ->minus((string) $invoice->amount_paid)
+                    ->toString()),
             ],
             'due_today' => $dueTodayInvoices,
             'open_maintenance' => $openMaintenance,
@@ -139,7 +146,7 @@ class OverviewController extends Controller
             ->map(fn (AuditLog $log) => [
                 'id' => $log->id,
                 'description' => $this->describeAudit($log),
-                'created_at' => $log->created_at->toISOString(),
+                'created_at' => DateTimeFormatter::iso($log->created_at),
                 'subject_type' => $log->auditable_type,
                 'subject_id' => $log->auditable_id,
                 'actor_name' => $log->actor?->name ?? 'System',
@@ -148,10 +155,10 @@ class OverviewController extends Controller
             ->values()
             ->toArray();
 
-        $ticketFormUnits = Unit::query()
+        $ticketFormUnitQuery = Unit::query()
             ->select(['id', 'slug', 'name', 'property_id', 'status'])
-            ->withCount(['leases as active_lease_count' => fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)])
-            ->with(['leases' => fn ($q) => $q->where('status', LeaseStatus::Active->value)->with('tenants:id,name')])
+            ->withCount(['leases as active_lease_count' => fn (Builder $q) => $q->active()])
+            ->with(['leases' => fn ($q) => $q->active()->with('tenants:id,name')])
             ->addSelect([
                 'has_maintenance_transfer' => LeaseUnitHistory::query()
                     ->selectRaw('1')
@@ -160,7 +167,11 @@ class OverviewController extends Controller
                     ->limit(1),
             ])
             ->whereIn('property_id', $accessibleProperties)
-            ->orderBy('name')
+            ->orderBy('name');
+
+        $ticketFormUnits = (clone $ticketFormUnitQuery)->get();
+        $ticketFormTransferUnits = (clone $ticketFormUnitQuery)
+            ->whereHas('property', fn (Builder $q) => $q->supportsUnitInventory())
             ->get();
 
         $ticketFormProperties = Property::query()
@@ -173,9 +184,12 @@ class OverviewController extends Controller
             ->orderBy('name')
             ->get(['id', 'name']);
 
-        $propertyTypes = PropertyType::active()->ordered()->get(['slug', 'label']);
+        $propertyTypes = PropertyType::active()->ordered()->get(['slug', 'label', 'default_rental_mode']);
 
-        $financeResult = $finance->computeFinance($activeLeases);
+        $financeResult = [
+            ...$finance->computeFinance($accessibleLeases),
+            'expenses' => $finance->computeExpenses($accessibleProperties),
+        ];
 
         return Inertia::render('dashboard/overview', [
             'attention' => $attention,
@@ -206,6 +220,7 @@ class OverviewController extends Controller
             'recent_activity' => $recentActivity,
             'properties' => $ticketFormProperties,
             'units' => $ticketFormUnits,
+            'transferUnits' => $ticketFormTransferUnits,
             'regions' => $regions,
             'propertyTypes' => $propertyTypes,
         ]);
@@ -265,5 +280,25 @@ class OverviewController extends Controller
             'Property' => route('properties.index'),
             default => null,
         };
+    }
+
+    /**
+     * @param  Collection<int, Invoice>  $invoices
+     * @return array<int, array{currency: string, amount: string}>
+     */
+    private function aggregateMoney(Collection $invoices, callable $amount): array
+    {
+        return $invoices
+            ->groupBy(fn (Invoice $invoice): string => $invoice->currency)
+            ->map(function (Collection $invoices, string $currency) use ($amount): array {
+                $total = $invoices->reduce(
+                    fn (BigDecimal $total, Invoice $invoice): BigDecimal => $total->plus($amount($invoice)),
+                    BigDecimal::zero(),
+                );
+
+                return ['currency' => $currency, 'amount' => $total->toString()];
+            })
+            ->values()
+            ->all();
     }
 }

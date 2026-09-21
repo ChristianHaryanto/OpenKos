@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Actions\Leases\CreateLease;
 use App\Actions\Leases\MoveOutLease;
 use App\Actions\Leases\RenewLease;
+use App\Actions\Leases\SettleLeaseDeposit;
 use App\Actions\Reminders\ForceSendReminder;
 use App\Business\Leases\LeaseStatusValidator;
 use App\Data\Lease\CreateLeaseData;
@@ -17,10 +18,12 @@ use App\Enums\UnitStatus;
 use App\Events\Lease\LeaseCreated;
 use App\Events\Lease\LeaseStatusChanged;
 use App\Events\Unit\UnitStatusChanged;
+use App\Http\Requests\Lease\DepositSettlementRequest;
 use App\Http\Requests\Lease\MoveLeaseRequest;
 use App\Http\Requests\Lease\MoveOutRequest;
 use App\Http\Requests\Lease\RenewLeaseRequest;
 use App\Http\Requests\Lease\StoreLeaseRequest;
+use App\Http\Requests\Lease\StorePropertyLeaseRequest;
 use App\Http\Requests\Lease\UpdateLeaseRequest;
 use App\Models\Invoice;
 use App\Models\Lease;
@@ -31,10 +34,12 @@ use App\Models\Unit;
 use App\Tables\Column;
 use App\Tables\Filter;
 use App\Tables\Table;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
@@ -53,11 +58,13 @@ class LeaseController extends Controller
         $lease->load([
             'tenants:id,name,phone',
             'primaryTenant:id,name,phone',
-            'unit.property.city',
+            'property.city',
+            'unit',
             'payments.confirmedBy:id,name',
-            'payments.proofs',
+            'payments.proofs.media',
             'payments.invoice:id,period_start,period_end,reference,status',
             'unitHistories.transferredBy:id,name',
+            'depositSettlement.deductions',
         ]);
 
         return Inertia::render('leases/show', [
@@ -102,7 +109,7 @@ class LeaseController extends Controller
             ->defaultSort('-payment_date');
 
         $result = $table->paginate(
-            $lease->payments()->with(['confirmedBy:id,name', 'proofs', 'invoice:id,reference,period_start,period_end,status']),
+            $lease->payments()->with(['confirmedBy:id,name', 'proofs.media', 'invoice:id,reference,period_start,period_end,status']),
             $request,
             'payments',
         );
@@ -132,7 +139,7 @@ class LeaseController extends Controller
         $result = $table->paginate(
             PaymentProof::query()
                 ->whereHas('payment.invoice', fn ($q) => $q->where('lease_id', $lease->id))
-                ->with('payment:id,invoice_id,amount,status', 'payment.invoice:id,period_start'),
+                ->with('media', 'payment:id,invoice_id,amount,status', 'payment.invoice:id,period_start'),
             $request,
             'documents',
         );
@@ -147,10 +154,11 @@ class LeaseController extends Controller
     {
         $this->authorize('viewAny', [Lease::class, $property]);
 
+        $property->load('city');
         $unit->load('property.city');
 
         $leases = $unit->leases()
-            ->with(['tenants:id,name,phone', 'primaryTenant:id,name,phone', 'payments.confirmedBy:id,name', 'payments.proofs', 'payments.invoice:id,period_start,period_end,reference,status'])
+            ->with(['property', 'tenants:id,name,phone', 'primaryTenant:id,name,phone', 'payments.confirmedBy:id,name', 'payments.proofs.media', 'payments.invoice:id,period_start,period_end,reference,status', 'depositSettlement.deductions'])
             ->withTrashed()
             ->orderBy('created_at', 'desc')
             ->get()
@@ -187,7 +195,7 @@ class LeaseController extends Controller
                 Column::make('tenant_name', 'Tenant')->searchable(function (Builder $q, string $search): void {
                     $q->whereHas('tenants', fn (Builder $q) => $q->where(DB::raw('lower(name)'), 'like', '%'.mb_strtolower($search).'%'))
                         ->orWhereHas('unit', fn (Builder $q) => $q->where(DB::raw('lower(name)'), 'like', '%'.mb_strtolower($search).'%'))
-                        ->orWhereHas('unit.property', fn (Builder $q) => $q->where(DB::raw('lower(name)'), 'like', '%'.mb_strtolower($search).'%'));
+                        ->orWhereHas('property', fn (Builder $q) => $q->where(DB::raw('lower(name)'), 'like', '%'.mb_strtolower($search).'%'));
                 }),
                 Column::make('unit_name', 'Unit'),
                 Column::make('property_name', 'Property'),
@@ -213,15 +221,12 @@ class LeaseController extends Controller
                     'value' => (string) $p->id,
                     'label' => $p->name,
                 ])->all())
-                    ->query(fn (Builder $q, string $value) => $q->whereHas(
-                        'unit',
-                        fn (Builder $q) => $q->whereIn('property_id', explode(',', $value)),
-                    )),
+                    ->query(fn (Builder $q, string $value) => $q->whereIn('property_id', explode(',', $value))),
             ])
             ->defaultSort('status,-start_date');
 
         $query = Lease::query()
-            ->with(['primaryTenant:id,name,phone', 'tenants:id,name,phone', 'unit:id,slug,name,property_id', 'unit.property:id,slug,name'])
+            ->with(['property:id,slug,name,rental_mode', 'primaryTenant:id,name,phone', 'tenants:id,name,phone', 'unit:id,slug,name,property_id', 'depositSettlement.deductions'])
             ->addSelect(['payment_status' => Invoice::query()
                 ->selectRaw("CASE WHEN COUNT(*) > 0 THEN 'overdue' ELSE 'paid' END")
                 ->whereColumn('lease_id', 'leases.id')
@@ -233,14 +238,14 @@ class LeaseController extends Controller
                     ->where('payments.status', PaymentStatus::Pending->value),
             ])
             ->when(! $request->user()->isOwner(), fn (Builder $q) => $q->whereHas(
-                'unit.property.users',
+                'property.users',
                 fn (Builder $q) => $q->whereKey($request->user()->id),
             ));
 
         $result = $table->paginate($query, $request, 'leases');
 
         $leases = $result['leases'];
-        $leases->loadMissing(['unit.property.city', 'payments.confirmedBy:id,name', 'payments.proofs', 'payments.invoice:id,period_start,period_end,reference,status']);
+        $leases->loadMissing(['property.city', 'payments.confirmedBy:id,name', 'payments.proofs.media', 'payments.invoice:id,period_start,period_end,reference,status']);
 
         $availableUnits = Unit::query()
             ->with('property.city')
@@ -250,37 +255,38 @@ class LeaseController extends Controller
                 'property.users',
                 fn (Builder $q) => $q->whereKey($request->user()->id),
             ))
+            ->whereHas('property', fn (Builder $q) => $q->supportsUnitInventory())
             ->availableForAssignment()
             ->orderBy('name')
             ->get();
 
         $accessibleQuery = fn (Builder $q) => $request->user()->isOwner()
             ? $q
-            : $q->whereHas('unit.property.users', fn (Builder $q) => $q->whereKey($request->user()->id));
+            : $q->whereHas('property.users', fn (Builder $q) => $q->whereKey($request->user()->id));
 
         $activeLeases = Lease::query()
-            ->where('status', LeaseStatus::Active->value)
+            ->active()
             ->when($accessibleQuery)
             ->count();
 
         $periodStart = Carbon::now()->startOfMonth()->startOfDay();
         $periodEnd = Carbon::now()->endOfMonth()->endOfDay();
 
-        $collectedThisMonth = (float) Payment::query()
+        $collectedThisMonth = Payment::query()
             ->whereNotIn('status', [PaymentStatus::Cancelled->value])
             ->whereHas('invoice', fn (Builder $q) => $q
                 ->whereBetween('period_start', [$periodStart, $periodEnd])
-                ->whereHas('lease', fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)->when($accessibleQuery)))
-            ->sum('amount');
+                ->whereHas('lease', fn (Builder $q) => $q->active()->when($accessibleQuery)))
+            ->get(['amount', 'currency']);
 
-        $overdueAmount = (float) Invoice::query()
+        $overdueAmount = Invoice::query()
             ->overdue()
-            ->whereHas('lease', fn (Builder $q) => $q->where('status', LeaseStatus::Active->value)->when($accessibleQuery))
-            ->sum(DB::raw('total - amount_paid'));
+            ->whereHas('lease', fn (Builder $q) => $q->active()->when($accessibleQuery))
+            ->get(['total', 'amount_paid', 'currency']);
 
         $pendingPaymentVerification = Payment::query()
             ->where('status', PaymentStatus::Pending->value)
-            ->whereHas('invoice.lease.unit.property', fn (Builder $q) => $request->user()->isOwner()
+            ->whereHas('invoice.lease.property', fn (Builder $q) => $request->user()->isOwner()
                 ? $q
                 : $q->whereHas('users', fn (Builder $q) => $q->whereKey($request->user()->id)))
             ->count();
@@ -290,8 +296,10 @@ class LeaseController extends Controller
             'availableUnits' => $availableUnits,
             'stats' => [
                 'active_leases' => $activeLeases,
-                'collected_this_month' => $collectedThisMonth,
-                'overdue_amount' => $overdueAmount,
+                'collected_this_month' => $this->aggregateMoney($collectedThisMonth, fn (Payment $payment): string => (string) $payment->amount),
+                'overdue_amount' => $this->aggregateMoney($overdueAmount, fn (Invoice $invoice): string => BigDecimal::of((string) $invoice->total)
+                    ->minus((string) $invoice->amount_paid)
+                    ->toString()),
                 'pending_payment_verification' => $pendingPaymentVerification,
             ],
         ]);
@@ -310,6 +318,7 @@ class LeaseController extends Controller
             billingUnit: $request->billing_unit,
             billingStrategy: $request->billing_strategy,
             unitRateId: $request->unit_rate_id,
+            unitTypeRateId: $request->unit_type_rate_id,
             depositAmount: $request->deposit_amount,
             depositPaidAt: $request->deposit_paid_at,
             depositRefundAmount: $request->deposit_refund_amount,
@@ -343,6 +352,36 @@ class LeaseController extends Controller
         return back();
     }
 
+    public function storeForProperty(StorePropertyLeaseRequest $request, Property $property, CreateLease $action): RedirectResponse
+    {
+        $this->authorize('create', [Lease::class, $property]);
+
+        $lease = $action->execute($property, new CreateLeaseData(
+            tenantIds: $request->tenant_ids,
+            startDate: $request->start_date,
+            endDate: $request->end_date,
+            rentAmount: $request->rent_amount,
+            billingInterval: $request->billing_interval,
+            billingUnit: $request->billing_unit,
+            billingStrategy: $request->billing_strategy,
+            unitRateId: null,
+            depositAmount: $request->deposit_amount,
+            depositPaidAt: $request->deposit_paid_at,
+            depositRefundAmount: $request->deposit_refund_amount,
+            depositRefundedAt: $request->deposit_refunded_at,
+            rentDueDay: $request->rent_due_day,
+            notes: $request->notes,
+            propertyRateId: $request->property_rate_id,
+        ));
+
+        $lease->load('tenants:id,name,phone', 'primaryTenant:id,name,phone');
+        LeaseCreated::dispatch($lease, $lease->tenants->pluck('id')->toArray(), actorId: Auth::id());
+
+        Inertia::flash('toast', ['type' => 'success', 'message' => __('Whole-property lease created.')]);
+
+        return back();
+    }
+
     public function update(UpdateLeaseRequest $request, Property $property, Unit $unit, Lease $lease): RedirectResponse
     {
         $this->authorize('update', $lease);
@@ -360,31 +399,40 @@ class LeaseController extends Controller
     {
         $this->authorize('delete', $lease);
 
-        $oldStatus = $lease->status;
+        $result = DB::transaction(function () use ($lease, $unit, $property): array {
+            $lockedProperty = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $lockedUnit = Unit::query()->lockForUpdate()->findOrFail($unit->id);
+            $lockedLease = Lease::query()->lockForUpdate()->findOrFail($lease->id);
+            $oldStatus = $lockedLease->status;
 
-        $this->leaseStatusValidator->validate($oldStatus, LeaseStatus::Terminated);
+            abort_unless((int) $lockedLease->property_id === $lockedProperty->id && (int) $lockedLease->unit_id === $lockedUnit->id, 422, __('Lease is no longer assigned to this property or unit.'));
+            $this->leaseStatusValidator->validate($oldStatus, LeaseStatus::Terminated);
 
-        DB::transaction(function () use ($lease, $unit) {
-            $lease->update([
+            $lockedLease->update([
                 'end_date' => now(),
                 'status' => LeaseStatus::Terminated,
                 'termination_date' => now(),
                 'termination_reason' => request('reason'),
             ]);
 
-            $unit->unsetRelation('leases');
+            $lockedUnit->unsetRelation('leases');
 
-            if ($unit->leases()->where('status', LeaseStatus::Active->value)->doesntExist() && $unit->status !== UnitStatus::Maintenance) {
-                $oldUnitStatus = $unit->status;
-                $unit->update(['status' => UnitStatus::Available]);
+            if ($lockedUnit->leases()->active()->doesntExist() && $lockedUnit->status !== UnitStatus::Maintenance) {
+                $oldUnitStatus = $lockedUnit->status;
+                $lockedUnit->update(['status' => UnitStatus::Available]);
 
-                if ($oldUnitStatus !== $unit->status) {
-                    UnitStatusChanged::dispatch($unit, $oldUnitStatus, $unit->status, actorId: Auth::id());
+                if ($oldUnitStatus !== $lockedUnit->status) {
+                    UnitStatusChanged::dispatch($lockedUnit, $oldUnitStatus, $lockedUnit->status, actorId: Auth::id());
                 }
             }
+
+            return [
+                'lease' => $lockedLease,
+                'old_status' => $oldStatus,
+            ];
         });
 
-        LeaseStatusChanged::dispatch($lease, $oldStatus, LeaseStatus::Terminated, actorId: Auth::id());
+        LeaseStatusChanged::dispatch($result['lease'], $result['old_status'], LeaseStatus::Terminated, actorId: Auth::id());
 
         Inertia::flash('toast', ['type' => 'success', 'message' => __('Lease terminated.')]);
 
@@ -410,13 +458,8 @@ class LeaseController extends Controller
             notes: $validated['notes'] ?? null,
             moveToAnotherUnit: $validated['move_to_another_unit'] ?? false,
             targetUnitId: $validated['target_unit_id'] ?? null,
+            depositSettlement: $request->settlementData(),
         );
-
-        $oldLeaseStatus = $lease->status;
-        $sourceUnit = $lease->unit;
-        $oldSourceStatus = $sourceUnit->status;
-
-        $oldTargetStatus = $targetUnit?->status;
 
         $result = $action->execute($lease, $data);
 
@@ -424,33 +467,42 @@ class LeaseController extends Controller
             abort(422, $result->error);
         }
 
-        $lease->refresh();
-        if ($oldLeaseStatus !== $lease->status) {
-            LeaseStatusChanged::dispatch($lease, $oldLeaseStatus, $lease->status, actorId: Auth::id());
+        if ($result->oldLeaseStatus !== $result->oldLease?->status) {
+            LeaseStatusChanged::dispatch($result->oldLease, $result->oldLeaseStatus, $result->oldLease->status, actorId: Auth::id());
         }
 
-        $sourceUnit->refresh();
-        if ($oldSourceStatus !== $sourceUnit->status) {
-            UnitStatusChanged::dispatch($sourceUnit, $oldSourceStatus, $sourceUnit->status, actorId: Auth::id());
+        if ($result->oldSourceStatus !== $result->newSourceStatus) {
+            UnitStatusChanged::dispatch($result->sourceUnit, $result->oldSourceStatus, $result->newSourceStatus, actorId: Auth::id());
         }
 
-        if ($targetUnit) {
-            $targetUnit->refresh();
-            if ($oldTargetStatus !== $targetUnit->status) {
-                UnitStatusChanged::dispatch($targetUnit, $oldTargetStatus, $targetUnit->status, actorId: Auth::id());
-            }
+        if ($result->oldTargetStatus !== $result->newTargetStatus) {
+            UnitStatusChanged::dispatch($result->targetUnit, $result->oldTargetStatus, $result->newTargetStatus, actorId: Auth::id());
         }
 
         Inertia::flash('toast', [
             'type' => 'success',
-            'message' => $validated['move_to_another_unit']
+            'message' => ($validated['move_to_another_unit'] ?? false)
                 ? __('Tenant moved to new unit.')
                 : __('Tenant moved out.'),
         ]);
 
-        if ($validated['move_to_another_unit']) {
+        if ($validated['move_to_another_unit'] ?? false) {
             return back();
         }
+
+        return back();
+    }
+
+    public function saveDepositSettlement(
+        DepositSettlementRequest $request,
+        Lease $lease,
+        SettleLeaseDeposit $action,
+    ): RedirectResponse {
+        $this->authorize('moveOut', $lease);
+
+        $action->execute($lease, $request->toData());
+
+        Inertia::flash('toast', ['type' => 'success', 'message' => __('Deposit settlement saved.')]);
 
         return back();
     }
@@ -517,33 +569,42 @@ class LeaseController extends Controller
             carryDepositRefund: true,
         );
 
-        $oldLeaseStatus = $lease->status;
-        $oldSourceStatus = $unit->status;
-        $oldTargetStatus = $targetUnit->status;
-
         $result = $action->execute($lease, $data);
 
         if ($result->failed()) {
             abort(422, $result->error);
         }
 
-        $lease->refresh();
-        if ($oldLeaseStatus !== $lease->status) {
-            LeaseStatusChanged::dispatch($lease, $oldLeaseStatus, $lease->status, actorId: Auth::id());
+        if ($result->oldLeaseStatus !== $result->oldLease?->status) {
+            LeaseStatusChanged::dispatch($result->oldLease, $result->oldLeaseStatus, $result->oldLease->status, actorId: Auth::id());
         }
 
-        $unit->refresh();
-        if ($oldSourceStatus !== $unit->status) {
-            UnitStatusChanged::dispatch($unit, $oldSourceStatus, $unit->status, actorId: Auth::id());
+        if ($result->oldSourceStatus !== $result->newSourceStatus) {
+            UnitStatusChanged::dispatch($result->sourceUnit, $result->oldSourceStatus, $result->newSourceStatus, actorId: Auth::id());
         }
 
-        $targetUnit->refresh();
-        if ($oldTargetStatus !== $targetUnit->status) {
-            UnitStatusChanged::dispatch($targetUnit, $oldTargetStatus, $targetUnit->status, actorId: Auth::id());
+        if ($result->oldTargetStatus !== $result->newTargetStatus) {
+            UnitStatusChanged::dispatch($result->targetUnit, $result->oldTargetStatus, $result->newTargetStatus, actorId: Auth::id());
         }
 
         Inertia::flash('toast', ['type' => 'success', 'message' => __('Tenant moved to new unit.')]);
 
         return back();
+    }
+
+    private function aggregateMoney(Collection $rows, callable $amount): array
+    {
+        return $rows
+            ->groupBy(fn (Invoice|Payment $row): string => $row->currency)
+            ->map(function ($rows, string $currency) use ($amount): array {
+                $total = $rows->reduce(
+                    fn (BigDecimal $total, Invoice|Payment $row): BigDecimal => $total->plus($amount($row)),
+                    BigDecimal::zero(),
+                );
+
+                return ['currency' => $currency, 'amount' => $total->toString()];
+            })
+            ->values()
+            ->all();
     }
 }
